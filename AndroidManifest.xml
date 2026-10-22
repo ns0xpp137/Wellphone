@@ -1,0 +1,35 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.wellphone.remote">
+ <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="33"/>
+ <uses-permission android:name="android.permission.INTERNET"/>
+ <uses-permission android:name="android.permission.VIBRATE"/>
+ <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"/>
+ <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+ <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+ <uses-permission android:name="moe.shizuku.manager.permission.API_V23"/>
+ <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries>
+ <application android:label="Wellphone" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
+  <activity android:name="local.wellphone.remote.MainActivity" android:exported="true">
+   <intent-filter>
+    <action android:name="android.intent.action.MAIN"/>
+    <category android:name="android.intent.category.LAUNCHER"/>
+   </intent-filter>
+  </activity>
+  <!-- Shizuku binder 接收口（服务端按 ${applicationId}.shizuku 推送 shell binder） -->
+  <provider
+    android:name="local.wellphone.remote.ShizukuBridgeProvider"
+    android:authorities="local.wellphone.remote.shizuku"
+    android:exported="true"
+    android:multiprocess="false"
+    android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+  <!-- 必须 exported，且要 intent-filter：只靠 action+package 是隐式广播，
+       Android 8+ 起 manifest 接收器收不到隐式广播（表现为"按了完全没反应"）。
+       现在 PendingIntent 用显式组件，intent-filter 再兜一层。 -->
+  <receiver android:name="local.wellphone.remote.ControlReceiver" android:exported="true">
+   <intent-filter><action android:name="local.wellphone.CONTROL"/></intent-filter>
+  </receiver>
+  <service android:name="local.wellphone.remote.AgentService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:label="Wellphone 服务">
+   <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+   <meta-data android:name="android.accessibilityservice" android:resource="@xml/probe"/>
+  </service>
+ </application>
+</manifest>
