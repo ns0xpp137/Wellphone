@@ -22,6 +22,18 @@ public class ShellChannel {
  }
  public static boolean ready(){ return binderReady() && permissionGranted(); }
 
+ /** Shizuku 没起但内置通道（adb 配对）已就绪 —— 这两条通道对上层是等价的。
+  *  ★ 以前所有调用点只写 ShellChannel.ready()，内置通道下的点击/输入/am start 全被判"不可用"，
+  *    旧机日志里"树被藏且 shell 通道不可用"就是这么来的。 */
+ public static boolean builtinReady(){
+  try{
+   android.content.Context c = App.ctx;
+   return c != null && BuiltinShell.hasSaved(c) && BuiltinShell.savedPort(c) > 0;
+  }catch(Throwable t){ return false; }
+ }
+ /** 任一条 shell 通道可用 */
+ public static boolean available(){ return ready() || builtinReady(); }
+
  public static void requestPermission(){
   try{ Shizuku.requestPermission(1); }catch(Throwable t){ Log.i(TAG, "requestPermission " + t); }
  }
@@ -48,7 +60,7 @@ public class ShellChannel {
 
  /** 原样取回 stdout+stderr，不看退出码（诊断 am start / pm grant 这类"结果写在输出里"的命令） */
  public static String raw(String cmd, long timeoutMs){
-  if(!ready()) return null;
+  if(!ready()) return builtinExec(cmd);
   IRemoteProcess p = null;
   try{
    IShizukuService svc = IShizukuService.Stub.asInterface(Shizuku.getBinder());
@@ -84,7 +96,7 @@ public class ShellChannel {
 
  /** 经 Shizuku 以 shell 身份执行命令；返回 stdout（含空串），失败返回 null */
  public static String exec(String cmd, long timeoutMs){
-  if(!ready()) return null;
+  if(!ready()) return builtinExec(cmd);
   IRemoteProcess p = null;
   try{
    IShizukuService svc = IShizukuService.Stub.asInterface(Shizuku.getBinder());
@@ -115,6 +127,26 @@ public class ShellChannel {
    return null;
   }finally{
    if(p != null){ try{ p.destroy(); }catch(Throwable t){} }
+  }
+ }
+
+ /** 内置通道（无 Shizuku）：把同一条命令经 adb shell 下发。
+  *  每次新建一条 adb 连接，约 200~300ms，够用；命令本身的行为与 Shizuku 通道完全一致。 */
+ private static String builtinExec(String cmd){
+  try{
+   android.content.Context c = App.ctx;
+   if(c == null){ AgentService.shotDebug("builtinExec: App.ctx 为空"); return null; }
+   // execFast 复用长连接；execFromSaved 每条命令都重新握手，大输出会丢
+   if(!BuiltinShell.hasSaved(c) || BuiltinShell.savedPort(c) <= 0){
+    AgentService.shotDebug("builtinExec: 还没有可用配对 port=" + BuiltinShell.savedPort(c));
+    return null;
+   }
+   String out = BuiltinShell.execFast(c, cmd);
+   if(out == null) AgentService.shotDebug("builtinExec: execFast 返回 null（连接异常）cmd=" + cmd);
+   return out;
+  }catch(Throwable t){
+   Log.i(TAG, "builtinExec err " + t);
+   return null;
   }
  }
 

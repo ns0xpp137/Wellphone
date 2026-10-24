@@ -27,17 +27,22 @@ public class MainActivity extends Activity {
  Agent agent;
  private Thread worker;
  private ThinkingWindow think;
- private Button btnWin, btnMirror, btnWatch;
+ private Button btnWin, btnMirror, btnWatch, btnBrain;
  private TextView memTitle;
  private LinearLayout memList;
  private ScrollView pageScroll;
 
- private void showThink(){
+ private void showThink(){ showThink(false); }
+ /** force=true 表示"用户刚发起任务，他想看过程"——这时即便之前被收起过也要重新显示。
+  *  否则会出现：点了悬浮窗上的「收起悬浮窗」，再跑任务时 step 1..N 全都不显示
+  *  （append/step 里都有 if(!shown) return，根本没地方画）。 */
+ private void showThink(boolean force){
   // 全局单例：已显示则只重绑按钮回调（Activity 重建不加第二个窗）
   if(ThinkingWindow.get().isShown()){
    ThinkingWindow.get().show(this, v -> stopTask(), v -> takeover());
    return;
   }
+  if(force) ThinkingWindow.get().clearUserHidden();
   // 用户主动隐藏过：Activity 重建不强行拉回
   if(ThinkingWindow.get().isUserHidden()){
    btnWin.setText("显示悬浮窗");
@@ -54,47 +59,69 @@ public class MainActivity extends Activity {
  public void onCreate(Bundle b){
   super.onCreate(b);
   current = this; App.ctx = getApplicationContext();
+  try{ BuiltinShell.init(this); }catch(Throwable ig){}
   agent = new Agent();
   agent.maxSteps = stepsLimit();   // 必须在 new Agent() 之后，否则 NPE 会让 onCreate 直接崩（表现为"一个日志都没有"）
   LinearLayout root = new LinearLayout(this);
   root.setOrientation(LinearLayout.VERTICAL);
-  root.setBackgroundColor(Color.parseColor("#f6f7f9"));
-  int p = dp(16);
+  root.setBackgroundColor(C_BG);
+  int p = dp(14);
   root.setPadding(p,p,p,p);
 
+  // 标题行：左边一个橙色小方块当品牌标记，呼应图标
+  LinearLayout head = new LinearLayout(this);
+  head.setOrientation(LinearLayout.HORIZONTAL);
+  head.setPadding(0,0,0,dp(12));
+  View dot = new View(this);
+  dot.setBackground(round(C_ACCENT, dp(4)));
+  dot.setLayoutParams(new LinearLayout.LayoutParams(dp(20), dp(20)));
+  head.addView(dot);
+  LinearLayout headTxt = new LinearLayout(this);
+  headTxt.setOrientation(LinearLayout.VERTICAL);
+  headTxt.setPadding(dp(8),0,0,0);
   TextView title = new TextView(this);
-  title.setText("Wellphone");
-  title.setTextSize(22); title.setTextColor(Color.parseColor("#222222"));
-  root.addView(title);
-
+  title.setText("机灵");
+  title.setTextSize(20); title.setTextColor(C_TEXT);
+  title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+  headTxt.addView(title);
   TextView sub = new TextView(this);
-  sub.setText("手机里的 agent · 虚拟屏幕后办事 · 随时接管");
-  sub.setTextSize(12); sub.setTextColor(Color.parseColor("#888888"));
-  sub.setPadding(0,0,0,dp(12));
-  root.addView(sub);
+  sub.setText("手机里的 agent · 虚拟屏里办事 · 随时接管");
+  sub.setTextSize(12); sub.setTextColor(C_SUB);
+  headTxt.addView(sub);
+  head.addView(headTxt);
+  root.addView(head);
 
   input = new EditText(this);
-  input.setHint("输入任务，例如：在美团点一杯奶茶，停在结算页等我确认");
+  input.setHint("输入任务");
   input.setMinLines(2);
+  input.setTextSize(14); input.setTextColor(C_TEXT);
+  input.setHintTextColor(C_HINT);
+  input.setBackground(roundEdge(C_CARD, C_EDGE, dp(14), dp(1)));
+  input.setPadding(dp(14), dp(12), dp(14), dp(12));
   // 悬浮窗那个输入框会一直占着 IME 的 served view，主界面这个就被顶掉、点不出键盘。
-  // 这里主动把 IME 服务抢回来。
-  View.OnFocusChangeListener imeGrab = (v, hasFocus) -> { if(hasFocus) showIme(); };
-  input.setOnFocusChangeListener(imeGrab);
+  // 这里主动把 IME 服务抢回来；顺手在聚焦时把边框点亮，明确"现在在编辑这里"。
+  input.setOnFocusChangeListener((v, hasFocus) -> {
+   input.setBackground(roundEdge(C_CARD, hasFocus ? C_ACCENT : C_EDGE, dp(14), hasFocus ? dp(2) : dp(1)));
+   if(hasFocus) showIme();
+  });
   input.setOnClickListener(v -> showIme());
   root.addView(input);
 
+  final LinearLayout cardTask = card("任务");
   LinearLayout row1 = new LinearLayout(this);
   row1.setOrientation(LinearLayout.HORIZONTAL);
-  row1.addView(btn("发送任务", "#185fa5", v -> startTask()));
+  row1.addView(btn("发送任务", "#F97316", v -> startTask()));   // 主操作用图标橙
   row1.addView(btn("语音输入", "#0f6e56", v -> startSpeech()));
-  root.addView(row1);
+  cardTask.addView(row1);
 
+  final LinearLayout cardCtl = card("接管");
   LinearLayout row2 = new LinearLayout(this);
   row2.setOrientation(LinearLayout.HORIZONTAL);
   row2.addView(btn("接管（跳过去）", "#ba7517", v -> takeover()));
   row2.addView(btn("返回后台", "#888888", v -> backToAgent()));
   row2.addView(btn("停止", "#a32d2d", v -> stopTask()));
-  root.addView(row2);
+  cardCtl.addView(row2);
+  root.addView(cardCtl);
 
   // 步数上限：步数直接决定 token 消耗，所以让用户自己定（20~50）
   LinearLayout rowSteps = new LinearLayout(this);
@@ -125,64 +152,91 @@ public class MainActivity extends Activity {
   });
   rowSteps.addView(seek);
   rowSteps.addView(stepVal);
-  root.addView(rowSteps);
+  cardTask.addView(rowSteps);
+  root.addView(cardTask);
 
+  final LinearLayout cardSet = card("设置");
   LinearLayout row25 = new LinearLayout(this);
   row25.setOrientation(LinearLayout.HORIZONTAL);
   btnWatch = btn("", "#712b13", v -> toggleMainWatch());
   row25.addView(btnWatch);
   row25.addView(btn("说明", "#5a5a6e", v -> explainMainWatch()));
-  root.addView(row25);
+  // 集成版专用：在本 App 内完成无线调试配对，不装 Shizuku、不用电脑
+  row25.addView(btn("内置配对", "#085041", v -> showBuiltinPairDialog()));
+  row25.addView(btn("API Key", "#5a2b0c", v -> showApiKeyDialog()));
+  cardSet.addView(row25);
 
   LinearLayout row3 = new LinearLayout(this);
   row3.setOrientation(LinearLayout.HORIZONTAL);
   btnWin = btn("隐藏悬浮窗", "#3c3489", v -> toggleThinkWindow());
   row3.addView(btnWin);
   row3.addView(btn("开启服务", "#085041", v -> openA11ySettings()));
-  root.addView(row3);
+  row3.addView(btn("新手引导", "#5a5a6e", v -> showWelcome()));
+  cardSet.addView(row3);
+
+  LinearLayout rowBrain = new LinearLayout(this);
+  rowBrain.setOrientation(LinearLayout.HORIZONTAL);
+  btnBrain = btn("大脑", "#534AB7", v -> cycleBrain());
+  rowBrain.addView(btnBrain);
+  cardSet.addView(rowBrain);
 
   LinearLayout row4 = new LinearLayout(this);
   row4.setOrientation(LinearLayout.HORIZONTAL);
   row4.addView(btn("连接Shell通道", "#712b13", v -> connectShell()));
   row4.addView(btn("验证截图", "#4a1b0c", v -> verifyCapture()));
-  root.addView(row4);
+  cardSet.addView(row4);
+  root.addView(cardSet);
 
+  final LinearLayout cardWs = card("工作区");
   LinearLayout row5 = new LinearLayout(this);
   row5.setOrientation(LinearLayout.HORIZONTAL);
   btnMirror = btn("隐藏镜像窗", "#3c3489", v -> toggleMirror());
   row5.addView(btnMirror);
   row5.addView(btn("镜像窗 位置", "#3c3489", v -> MirrorWindow.get().cycleCorner()));
   row5.addView(btn("镜像窗 大小", "#3c3489", v -> MirrorWindow.get().cycleSize()));
-  row5.addView(btn("一键准备", "#085041", v -> prepareAll()));
-  row5.addView(btn("诊断", "#5a2b0c", v -> diagnose()));
-  root.addView(row5);
+  cardWs.addView(row5);
 
+  // ★ overlay 副屏是系统级的：App 被划掉/强杀时 DisplayHost 的清理逻辑来不及跑，
+  //   那块屏和它画在主屏上的预览窗就会一直留着，用户清后台也清不掉。
+  //   所以必须给一个能立刻收掉它的入口。
+  LinearLayout row5b = new LinearLayout(this);
+  row5b.setOrientation(LinearLayout.HORIZONTAL);
+  row5b.addView(btn("收起副屏", "#8a1f1f", v -> dismissWorkspace()));
+  row5b.addView(btn("一键准备", "#085041", v -> prepareAll()));
+  row5b.addView(btn("诊断", "#5a2b0c", v -> diagnose()));
+  cardWs.addView(row5b);
+  root.addView(cardWs);
+
+  final LinearLayout cardDemo = card("演示");
   LinearLayout draftRow = new LinearLayout(this);
   draftRow.addView(btn("验证微信草稿（不发送）", "#085041", v -> {
    if(worker != null && worker.isAlive()){ toast("有任务在跑"); return; }
    input.setText("打开微信，找到联系人赵禹哲，进入与他的会话，在消息输入框填写123。不要发送，填写完成就停止。");
    startTask("123");
   }));
-  root.addView(draftRow);
+  cardDemo.addView(draftRow);
+  root.addView(cardDemo);
   status = new TextView(this);
   showStatus("状态：空闲");
-  status.setTextSize(14); status.setTextColor(Color.parseColor("#555555"));
-  status.setPadding(0,dp(10),0,0);
+  status.setTextSize(13);
+  status.setBackground(roundEdge(C_CARD, C_EDGE, dp(12), dp(1)));
+  status.setPadding(dp(12), dp(10), dp(12), dp(10));
   root.addView(status);
 
   // ===== 记忆区 =====
   // 跑过一遍才确定下来的事实：应用别名、可直达页面、偏好、踩过的坑。
   // 下次同 App 同类型任务直接复用，也避免在同一个地方再翻车。
+  final LinearLayout cardMem = card("");   // 标题用 memTitle（带条数），别重复
   LinearLayout memHead = new LinearLayout(this);
   memHead.setOrientation(LinearLayout.HORIZONTAL);
   memTitle = new TextView(this);
-  memTitle.setTextSize(13); memTitle.setTextColor(Color.parseColor("#222222"));
-  memTitle.setPadding(0, dp(10), 0, 0);
+  memTitle.setTextSize(13); memTitle.setTextColor(C_TEXT);
+  memTitle.setPadding(0, dp(2), 0, 0);
   memTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
   memHead.addView(memTitle);
   memHead.addView(smallBtn("编辑原文", v -> editMemory()));
   memHead.addView(smallBtn("清空", v -> { MemoryStore.clear(this); renderMemory(); log("记忆已清空"); }));
-  root.addView(memHead);
+  cardMem.addView(memHead);
 
   final ScrollView memScroll = new ScrollView(this);
   // 嵌套在外层 ScrollView 里，不抢的话内层根本滚不动
@@ -192,19 +246,51 @@ public class MainActivity extends Activity {
   });
   memList = new LinearLayout(this);
   memList.setOrientation(LinearLayout.VERTICAL);
-  memList.setBackgroundColor(Color.parseColor("#eef0f4"));
+  memList.setBackground(roundEdge(0xFFFBF7F3, C_EDGE, dp(12), dp(1)));
   memList.setPadding(dp(8), dp(4), dp(8), dp(4));
   memScroll.addView(memList);
   memScroll.setLayoutParams(new LinearLayout.LayoutParams(
     ViewGroup.LayoutParams.MATCH_PARENT, dp(84)));
-  root.addView(memScroll);
+  cardMem.addView(memScroll);
+  root.addView(cardMem);
+  // ===== 技能库（程序化记忆）：只有技能版显示 =====
+  if(SkillStore.enabled(this)){
+   final LinearLayout cardSkill = card("");
+   LinearLayout skHead = new LinearLayout(this);
+   skHead.setOrientation(LinearLayout.HORIZONTAL);
+   skillTitle = new TextView(this);
+   skillTitle.setTextSize(13); skillTitle.setTextColor(C_TEXT);
+   skillTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+   skillTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+   skHead.addView(skillTitle);
+   skHead.addView(smallBtn("清空", v -> {
+    SkillStore.clear(this); renderSkills(); log("技能库已清空");
+   }));
+   skillList = new LinearLayout(this);
+   skillList.setOrientation(LinearLayout.VERTICAL);
+   skillList.setBackground(roundEdge(0xFFFBF7F3, C_EDGE, dp(12), dp(1)));
+   skillList.setPadding(dp(8), dp(4), dp(8), dp(4));
+   ScrollView skScroll = new ScrollView(this);
+   skScroll.setOnTouchListener((v, ev) -> {
+    if(pageScroll != null) pageScroll.requestDisallowInterceptTouchEvent(true);
+    return false;
+   });
+   skScroll.addView(skillList);
+   skScroll.setLayoutParams(new LinearLayout.LayoutParams(
+     ViewGroup.LayoutParams.MATCH_PARENT, dp(96)));
+   cardSkill.addView(skHead);
+   cardSkill.addView(skScroll);
+   root.addView(cardSkill);
+   renderSkills();
+  }
   renderMemory();
   refreshWatchBtn();
+  refreshBrainBtn();
 
   logView = new TextView(this);
-  logView.setTextSize(11); logView.setTextColor(Color.parseColor("#d8dee9"));
-  logView.setBackgroundColor(Color.parseColor("#1e1e2e"));
-  logView.setPadding(dp(10),dp(8),dp(10),dp(8));
+  logView.setTextSize(11); logView.setTextColor(Color.parseColor("#e8e2dc"));
+  logView.setBackground(round(0xFF25211D, dp(12)));
+  logView.setPadding(dp(12),dp(10),dp(12),dp(10));
   LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
     ViewGroup.LayoutParams.MATCH_PARENT, dp(150));
   lp.topMargin = dp(10);
@@ -243,7 +329,19 @@ public class MainActivity extends Activity {
   };
 
   refreshControlNotification();
-  bootstrap();
+
+  // ★ 悬浮窗/镜像窗要浮在别的 App 上，必须先有「显示在上层」授权。
+  //   不主动要的话，用户只会看到"点了没反应"，永远想不到是权限没开。
+  if(!canOverlay()){ askOverlay(); }
+
+  // 第一次打开：先把要开什么、能干什么说清楚，再走自检。
+  // 不然新用户面对一堆按钮根本不知道从哪开始。
+  if(getSharedPreferences("wellphone", MODE_PRIVATE).getBoolean("first_run", true)){
+   getSharedPreferences("wellphone", MODE_PRIVATE).edit().putBoolean("first_run", false).apply();
+   showWelcome();
+  }else{
+   bootstrap();
+  }
 
   handleIntentExtras(getIntent());
  }
@@ -266,6 +364,20 @@ public class MainActivity extends Activity {
   final boolean autorun = it.getBooleanExtra("autorun", false);
   final boolean diag = it.getBooleanExtra("diag", false);
   final String stopText = it.getStringExtra("stopText");   // 写到这句就停，绝不发送（安全阀）
+  String akExtra = it.getStringExtra("apikey");   // 调试/自动化用：直接注入 key
+  if(akExtra != null && !akExtra.isEmpty()){
+   getSharedPreferences("wellphone", MODE_PRIVATE).edit().putString("api_key", akExtra).apply();
+   log("API key 已由参数注入");
+  }
+  final String shellCmd = it.getStringExtra("shellcmd");   // 调试：通过内置通道下发任意命令
+  if(shellCmd != null && !shellCmd.isEmpty()){
+   new Thread(() -> {
+    BuiltinShell.runShellFromSaved(this, shellCmd, this::logSafe);
+   }).start();
+  }
+  if(it.getBooleanExtra("pair", false)){          // 调试：直接拉起内置配对服务
+   try{ PairShellService.start(this); log("已启动内置配对服务"); }catch(Throwable e2){ log("启动失败 "+e2); }
+  }
   if(it.getBooleanExtra("watch", false)){                  // 一键开启主屏监控（演示/自测用）
    getSharedPreferences("wellphone", MODE_PRIVATE).edit().putBoolean("main_watch", true).apply();
    refreshWatchBtn();
@@ -285,6 +397,70 @@ public class MainActivity extends Activity {
   if(it.getBooleanExtra("testctl", false)) h.postDelayed(() -> selfTestControls(), 5000);
  }
 
+ /** 切换主循环用哪个模型当大脑。实测对比 doubao / deepseek 谁更快更准，就靠这个按钮，
+  *  不用每次改 llm.json 再重启。 */
+ private void cycleBrain(){
+  List<Agent.Provider> ps = Agent.PROVIDERS;
+  int start = agent.curProvider;
+  for(int k = 1; k <= ps.size(); k++){
+   int i = (start + k) % ps.size();
+   Agent.Provider p = ps.get(i);
+   if(p.dead || p.key == null || p.key.isEmpty()) continue;
+   agent.curProvider = i;
+   getSharedPreferences("wellphone", MODE_PRIVATE).edit().putString("vision_name", p.name).apply();
+   log("主循环大脑切换为 " + p.name + "（" + p.model + "）");
+   refreshBrainBtn();
+   return;
+  }
+  toast("没有其他可用模型，先在 llm.json 或 API Key 里配上");
+ }
+ private void refreshBrainBtn(){
+  if(btnBrain == null) return;
+  Agent.Provider p = Agent.PROVIDERS.get(Math.max(0, agent.curProvider));
+  btnBrain.setText("大脑：" + p.name);
+ }
+
+ /** 「显示在上层」权限：悬浮窗和镜像窗都要浮在别的 App 上，没有它点了只会"没反应" */
+ private boolean canOverlay(){
+  try{ return android.provider.Settings.canDrawOverlays(this); }catch(Throwable t){ return true; }
+ }
+ private void askOverlay(){
+  try{
+   Intent i = new Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+     android.net.Uri.parse("package:" + getPackageName()));
+   i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+   startActivity(i);
+   log("需要「显示在上层」权限：悬浮窗和镜像窗要浮在其他应用上面，请在设置里打开它");
+   toast("请开启「显示在上层」");
+  }catch(Throwable t){ log("打不开悬浮窗权限设置: " + t); }
+ }
+
+ /** 第一次打开时说清楚：要开什么 + 能干什么。
+  *  不然新用户看到一堆按钮，根本不知道从哪一步开始。 */
+ private void showWelcome(){
+  String msg =
+    "机灵的做法是：在你的手机里再开一块屏，agent 在那块屏上跑真实 App。\n"
+    + "你在用你的屏幕，它用它的，互不打扰——它碰不到你的屏，默认也看不到你的屏。\n\n"
+    + "【开始前，需要你开三样】\n"
+    + "1. 无障碍服务 —— agent 的眼睛和手（读界面结构、写文字）\n"
+    + "2. 无线调试配对 —— 免 Root 拿到建屏权限（不用装 Shizuku、不用电脑）\n"
+    + "3. API key —— 给 agent 一个会看画面的大脑\n\n"
+    + "另外「显示在上层」要开，悬浮窗和镜像窗才能浮在其他应用上。\n\n"
+    + "【它能做什么】\n"
+    + "· 在后台打开真实 App 干多步任务（搜索、填表、下单）\n"
+    + "· 碰到支付/登录会停下，把界面整个搬给你来\n"
+    + "· 随时可以把工作区搬到你的屏幕上接着操作\n"
+    + "· 同一类任务跑过两次后，它会记住怎么做，下次直接照做\n\n"
+    + "下面每一项在界面上都有对应按钮；缺哪一步，运行日志会直接告诉你。";
+  new android.app.AlertDialog.Builder(this)
+    .setTitle("机灵 · 开始之前")
+    .setMessage(msg)
+    .setPositiveButton("开始设置", (d, w) -> bootstrap())
+    .setNegativeButton("我自己看看", null)
+    .setCancelable(false)
+    .show();
+ }
+
  /** 启动自检：Shizuku → 无障碍 → 虚拟屏。能自动的都自动，绕不过的那一步说清楚。 */
  private volatile boolean bootstrapping = false;
  void bootstrap(){
@@ -292,10 +468,39 @@ public class MainActivity extends Activity {
   // 全就绪就别再跑一遍（onCreate 和 onResume 都会触发，否则日志会成对重复）
   if(AgentService.instance != null && agent.displayId > 0){ refreshControlNotification(); return; }
   bootstrapping = true;
+  // ★ 自检一开始就把 llm.json 读进来：否则 PROVIDERS 的 key 全是空的，
+  //   界面上那个「大脑」切换按钮会因为"没有可用模型"而点不动（要等跑过一次任务才生效）。
+  agent.applyLlmConfig(this);
+  refreshBrainBtn();
   new Thread(() -> {
    try{
     if(!ShellChannel.binderReady()){
-     logSafe("① Shizuku 没在运行 —— 这一步必须你授权一次（安卓安全边界，App 自己绕不过）");
+     // 集成版：改用内置的无线调试通道（adb 协议实现取自 Shizuku，Apache-2.0）
+     if(BuiltinShell.hasSaved(this) && BuiltinShell.savedPort(this) > 0){
+      logSafe("① Shizuku 未运行 → 用内置通道");
+      // 先看有没有已经在跑的 DisplayHost：有就复用，不重复启动
+      if(OwnedDisplay.connectIfRunning()){
+       logSafe("   已有工作区在跑，直接复用");
+       h.post(() -> { try{ ensureDisplay(); }catch(Throwable t){} });
+       finishBootstrapBuiltin();
+       return;
+      }
+      logSafe("   复用已配对的连接 " + "…");
+      final String cmd = "CLASSPATH="
+        + quote(getApplicationInfo().sourceDir) + " WELLPHONE_SOCKET_PORT=" + OwnedDisplay.BUILTIN_PORT
+        + " app_process /system/bin local.wellphone.remote.DisplayHost";
+      // ★ runDaemon 会一直阻塞到宿主进程退出（正常运行时永远不返回），
+      //   所以「连虚拟屏」必须另起一条线程并行做，否则宿主活着 = 永远连不上。
+      new Thread(() -> { try{ BuiltinShell.startWorkspace(this, cmd, this::logSafe); }catch(Throwable t){} },
+        "workspace-daemon").start();
+      new Thread(() -> {
+       try{ Thread.sleep(1500); }catch(Throwable t){}
+       h.post(() -> { try{ ensureDisplay(); }catch(Throwable t){} });
+      },"workspace-connect").start();
+      finishBootstrapBuiltin();
+      return;
+     }
+     logSafe("① 没有可用的 Shell 通道 —— 点『内置配对』，按提示在手机上做一次无线调试配对即可");
      logSafe("  点「一键准备」会打开 Shizuku，在里面点『通过无线调试启动』。之后开机会自动恢复");
      h.post(() -> showStatus("状态：等待 Shizuku 授权"));
      return;
@@ -320,6 +525,8 @@ public class MainActivity extends Activity {
  private boolean enableA11yByShell(){
   try{
    if(AgentService.instance != null) return true;
+   // 内置通道下 ShellChannel 用不了，改走 adb shell
+   if(!ShellChannel.binderReady()) return enableA11yByBuiltin();
    String me = getPackageName() + "/" + AgentService.class.getName();
    String cur = ShellChannel.raw("settings get secure enabled_accessibility_services", 6000);
    // ★ 必须清洗：settings put ... '' 实际会写成字面量 null，攒几轮就变成
@@ -354,20 +561,21 @@ public class MainActivity extends Activity {
   }catch(Throwable t){ return false; }
  }
 
- /** 一键准备：缺哪一步就补哪一步；Shizuku 没起来就把用户送过去 */
+ /** 一键准备：缺哪一步就补哪一步。
+  *  集成版有内置配对通道时，压根不需要 Shizuku，别把用户往 Shizuku 界面上带。 */
  private void prepareAll(){
-  if(!ShellChannel.binderReady()){
-   log("未检测到 Shizuku，正在打开…");
-   toast("在 Shizuku 里点『通过无线调试启动』，完成后回来");
+  if(!ShellChannel.binderReady() && !ShellChannel.builtinReady()){
+   log("还没有 Shell 通道：先点『内置配对』用无线调试配对一次（不用装 Shizuku）");
+   toast("先做一次内置配对");
    try{
     Intent i = new Intent();
     i.setClassName("moe.shizuku.privileged.api", "moe.shizuku.privileged.api.MainActivity");
     i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
     startActivity(i);
-   }catch(Throwable t){ log("打不开 Shizuku：装了没？" + t); }
+   }catch(Throwable t){ log("（Shizuku 也没装，用内置配对即可）"); }
    return;
   }
-  log("开始一键准备：Shizuku → 无障碍 → 虚拟屏");
+  log("开始一键准备：Shell 通道 → 无障碍 → 虚拟屏");
   bootstrap();
  }
 
@@ -391,7 +599,9 @@ public class MainActivity extends Activity {
      log("虚拟屏就绪 display=" + id);
      boolean ok = MirrorWindow.get().show(this, id);
      log(ok ? "镜像窗已开启（左上角，可切位置/大小）" : "⚠️ 镜像窗无法显示（需悬浮窗权限）");
-    }else log("⚠️ 虚拟屏创建失败：先点「连接Shell通道」把 Shizuku 跑起来");
+    }else log("⚠️ 虚拟屏创建失败：" + (ShellChannel.available()
+       ? "Shell 通了但没建出屏，看上面 host> 开头的报错"
+       : "还没有 Shell 通道：先做一次内置配对"));
    });
   }).start();
  }
@@ -472,16 +682,44 @@ public class MainActivity extends Activity {
   if(AgentService.instance == null){ toast("请先开启无障碍服务"); return; }
   agent.diagnosticStopText = stopAfterText;
   log("▶ " + t);
+  showThink(true);   // 跑任务 = 想看过程，把思考窗拉回来
   if(think != null){ think.setExpanded(true); think.reset("任务: " + t); }
   takeoverActive = false;
   takeoverTaskId = null;
-  final boolean watchMode = isWatchTask(t);
-  if(watchMode && mainWatchOn() && think != null) think.setStepLabel("监控中 · 看你的屏幕");
-  if(watchMode && !mainWatchOn()){
-   log("⚠️ 这是「等到条件就出手」的任务，需要看你的屏幕。请先打开「主屏监控」开关。");
-   toast("请先打开「主屏监控」开关");
+  // ★ 意图交给模型判，不再靠关键词 if-else（"出现"那种词太容易误伤普通任务）。
+  //   模型没说话（没 key / 超时 / 返回非法 JSON）时 routeIntent 内部回退到规则。
+  final Agent.Route rt = Agent.routeIntent(t, this::logSafe);
+  logSafe("意图路由：" + rt.type + (rt.byLLM ? "（模型判断）" : "（规则兜底）")
+    + ("task".equals(rt.type) ? " · " + rt.mode : ""));
+  // 只是提问：直接回答，不建屏、不截图、不调视觉模型
+  if("question".equals(rt.type)){
+   String ans = (rt.reply == null || rt.reply.isEmpty())
+     ? "（模型没给出答案，试着问得具体一点）" : rt.reply;
+   log("💬 问答：" + ans);
+   if(think != null) think.append("\n» " + ans + "\n");
+   showStatus("状态：已回答");
    return;
   }
+  final boolean watchMode = "main".equals(rt.mode) || isWatchTask(t);
+  if(watchMode && mainWatchOn() && think != null) think.setStepLabel("监控中 · 看你的屏幕");
+  if(watchMode && !mainWatchOn()){
+   // 别让用户自己去 UI 里找那个开关（悬浮窗常把它盖住，点了也没反应）。
+   // 直接问一次：要不要现在打开。这是隐私开关，必须用户亲手点头。
+   log("⚠️ 这个任务需要看你的屏幕。");
+   new android.app.AlertDialog.Builder(this)
+     .setTitle("需要看你的屏幕")
+     .setMessage("模型判断「" + t + "」需要盯着你正在看的画面才能判断时机。\n\n"
+       + "要现在打开主屏监控吗？\n"
+       + "（这是隐私开关，随时可关；关着的时候 agent 绝不会看你的屏幕）")
+     .setPositiveButton("打开并继续", (d, w) -> {
+       if(!mainWatchOn()) toggleMainWatch();
+       startTask(stopAfterText);
+     })
+     .setNegativeButton("取消", null)
+     .show();
+   return;
+  }
+
   worker = new Thread(() -> { try{
     if(watchMode) agent.runWatch(getApplicationContext(), t, AgentService.instance, this::logSafe,
       (state, msg) -> h.post(() -> {
@@ -525,9 +763,15 @@ public class MainActivity extends Activity {
   }
  }
  private void connectShell(){
+  // 集成版：内置配对通道（adb）也算"有 Shell"——别一头扎进 Shizuku 的提示里
+  if(!ShellChannel.binderReady() && ShellChannel.builtinReady()){
+   log("Shell 通道已就绪（内置配对通道 / adb shell）");
+   toast("Shell 通道已就绪");
+   return;
+  }
   if(!ShellChannel.binderReady()){
-   log("⚠️ Shizuku 未连接：请先打开 Shizuku 应用，用「无线调试」启动服务");
-   toast("先打开 Shizuku 启动服务");
+   log("⚠️ 还没有 Shell 通道：点『内置配对』用无线调试配对一次（不用装 Shizuku）");
+   toast("先做一次内置配对");
    try{
     Intent i = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
     if(i != null){ startActivity(i); log("已打开 Shizuku"); }
@@ -548,8 +792,25 @@ public class MainActivity extends Activity {
    boolean ok = ShellChannel.tap(agent.displayId, agent.VW/2, agent.VH/2);
    h.post(() -> {
     log(ok ? "Shell 点击成功（虚拟屏中心）" : "Shell 点击失败：" +
-      (ShellChannel.ready() ? "执行错误" : "通道未就绪，先点「连接Shell通道」"));
+      (ShellChannel.available() ? "执行错误（看 DisplayHost 报错）" : "通道未就绪，先做一次内置配对"));
     toast(ok ? "Shell 点击 OK" : "Shell 点击失败");
+   });
+  }).start();
+ }
+
+ /** 立刻收掉后台工作区：撤销 overlay 副屏（系统那个预览窗随之消失）、关镜像窗、断宿主。
+  *  什么时候用：App 被强杀过、预览窗赖着不走、或者你想彻底把工作区从机器上抹掉。 */
+ private void dismissWorkspace(){
+  new Thread(() -> {
+   String out = ShellChannel.raw("settings delete global overlay_display_devices", 8000);
+   logSafe("收起副屏: " + (out == null ? "（shell 通道不可用，改用 App 侧清理）" : out.trim()));
+   h.post(() -> {
+    try{ MirrorWindow.get().hide(); }catch(Throwable ig){}
+    OwnedDisplay.close();
+    OwnedDisplay.overlayMode = false;
+    agent.displayId = -1;
+    log("工作区已收起：overlay 副屏已撤销，那个「叠加视图」预览窗应该没了");
+    toast("已收起副屏");
    });
   }).start();
  }
@@ -580,20 +841,32 @@ public class MainActivity extends Activity {
   // 用户亲自上手了，工作区镜像就该收起来——不然交给你之后它还播着上一个任务的画面
   mirrorWasOn = MirrorWindow.get().isShown();
   if(mirrorWasOn) MirrorWindow.get().hide();
-  agent.preGrant(agent.currentPkg);
-  // 首选：把 agent 正在用的那个任务整块搬到你屏幕上（同一个实例，界面状态不丢）
-  String tid = agent.takeoverMoveToMain();
-  if(tid != null){
-   takeoverTaskId = tid;
-   log("🤝 已把工作区搬到你的屏幕（同一个实例，状态原样保留）");
-   showStatus("状态：等你处理（手动接管）");
-   toast("已接管，界面就是你交给 agent 的那个");
-  }else{
-   // 退路：搬不动才另开实例（那样会丢状态、多一个后台，实在没办法才用）
-   agent.openOnUserScreen(getApplicationContext());
-   log("接管：任务搬移失败，改为在你屏幕新开一个实例（状态不连续）");
-   showStatus("状态：等你处理（新建实例）");
-  }
+  // ★ 下面两步要走 shell（adb 网络连接），**绝不能在主线程跑**：
+  //   一跑就抛 NetworkOnMainThreadException → execFast 返回 null → findTaskId 找不到任务
+  //   → 每次都掉进"新开实例"兜底，用户看到的就是"接管又开了个新应用"。搬任务的失败
+  //   一直是这个原因，不是 move-stack 不支持、也不是找错任务。
+  new Thread(() -> {
+   agent.preGrant(agent.currentPkg);
+   // 首选：把 agent 正在用的那个任务整块搬到你屏幕上（同一个实例，界面状态不丢）
+   final String tid = agent.takeoverMoveToMain();
+   h.post(() -> {
+    if(tid != null){
+     takeoverTaskId = tid;
+     log("🤝 已把工作区搬到你的屏幕（同一个实例，状态原样保留）");
+     showStatus("状态：等你处理（手动接管）");
+     toast("已接管，界面就是你交给 agent 的那个");
+    }else{
+     // 退路：搬不动才另开实例（那样会丢状态、多一个后台，实在没办法才用）
+     // ★ openOnUserScreen 也要走 shell，别在 h.post 里调 —— 那是主线程，照样抛
+     //   NetworkOnMainThreadException（之前就是漏了这一处，接管兜底也跟着废了）。
+     new Thread(() -> {
+      agent.openOnUserScreen(getApplicationContext());
+     },"takeover-open").start();
+     log("接管：任务搬移失败，改为在你屏幕新开一个实例（状态不连续）");
+     showStatus("状态：等你处理（新建实例）");
+    }
+   });
+  },"takeover").start();
  }
  public void backToAgent(){
   takeoverActive = false;
@@ -601,15 +874,36 @@ public class MainActivity extends Activity {
   // 任务搬回工作区。不依赖 takeoverTaskId 是否记得住——
   // 没记录就按当前应用现找它的任务，照样搬（悬浮窗按钮以前"点了没反应"就是因为
   // backToAgent 只认那两个标志，没接管过时它们都是空的，整段代码等于没跑）。
-  String tid = takeoverTaskId;
-  if(tid == null && agent.currentPkg != null && !agent.currentPkg.isEmpty())
-   tid = agent.findTaskId(agent.currentPkg);
-  if(tid != null){
-   boolean ok = agent.moveTaskBack(tid) != null;
-   log(ok ? "↩ 已把任务搬回后台工作区" : "⚠️ 搬回工作区失败");
-  }else{
-   log("（没有需要搬回的任务）");
-  }
+  // ★ findTaskId / moveTaskBack 都要走 shell（网络），同 takeover 一样不能在沾主线程。
+  final String remembered = takeoverTaskId;
+  new Thread(() -> {
+   // 搬回去要找**主屏上**那个任务（接管时它被搬到了 display 0）
+   String tid = remembered;
+   if(tid == null && agent.currentPkg != null && !agent.currentPkg.isEmpty())
+    tid = agent.findTaskId(agent.currentPkg, 0);
+   final String found = tid;
+   h.post(() -> {
+    if(found != null){
+     // moveTaskBack 也要走网络，再开一层
+     new Thread(() -> {
+      boolean ok = agent.moveTaskBack(found) != null;
+      logSafe(ok ? "↩ 已把任务搬回后台工作区" : "⚠️ 搬回工作区失败");
+     },"back-move").start();
+    }else{
+     log("（没有需要搬回的任务）");
+   // 接管若走的是"主屏新开实例"兜底，就没记下 task id，那个实例搬不回副屏。
+   // 别就这么悬着 —— 让 agent 在副屏重新起一个，至少它还有活干。
+   if(agent.currentPkg != null && !agent.currentPkg.isEmpty() && agent.displayId > 0){
+    log("主屏这个实例搬不回去，让 agent 在副屏重新开始");
+    final String app = agent.currentPkg;
+    new Thread(() -> {
+     boolean ok = agent.launchOnVirtual(getApplicationContext(), app, this::logSafe);
+     logSafe(ok ? "副屏已重新起好 " + app : "副屏重启失败：" + app);
+    }).start();
+   }
+    }
+   });
+  },"back-to-agent").start();
   takeoverTaskId = null;
   // 镜像窗：没开着就恢复，同样不依赖记忆标志
   if(agent.displayId > 0 && !MirrorWindow.get().isShown()){
@@ -736,9 +1030,15 @@ public class MainActivity extends Activity {
   *  这类任务不能套"走 N 步完成"的循环，得持续看屏幕等条件。 */
  static boolean isWatchTask(String t){
   if(t == null) return false;
-  String[] keys = {"当", "一旦", "出现", "就拍", "飞过", "一直", "持续", "监控", "等到",
-                   "的时候", "就发", "就点", "喊到", "说到", "说出"};
-  for(String k : keys) if(t.contains(k)) return true;
+  // 强信号：明确说要看用户的屏幕
+  if(t.contains("监控") || t.contains("盯着") || t.contains("我的屏幕")
+     || t.contains("你在看") || t.contains("主屏")) return true;
+  // ★ 组合信号：必须"条件触发"和"就出手"同时成立，缺一不可。
+  //   以前把"出现""就点"单独算命中，结果普通跨 App 任务被误判成监控：
+  //   实测「打开微信…里面出现任意商品就去京东买」被直接拦下要求开主屏监控——
+  //   它只是"找到东西然后去买"，根本不需要盯着用户的屏幕。
+  String[] trigger = {"一旦","等到","的时候","持续","一直","飞过","喊到","轮到","说出","说到"};
+  for(String k : trigger) if(t.contains(k) && t.contains("就")) return true;
   return false;
  }
 
@@ -794,6 +1094,140 @@ public class MainActivity extends Activity {
   try{ ThinkingWindow.get().setStatusText(s); }catch(Throwable t){}
  }
 
+ /** 配 API key：存 SharedPreferences，最可靠（不依赖外部存储文件） */
+ /** 两个模型都要配：豆包跑主循环看画面，DeepSeek 跑意图路由和问答。
+  *  ★ 都存 SharedPreferences，不靠 llm.json —— 本机 App 读自己 Android/data/<pkg>/files
+  *    实测会失败，之前 llm.json 里的 DeepSeek key 根本没读进来，
+  *    结果就是「大脑」按钮切换时找不到可用模型、点了没反应。 */
+ private void showApiKeyDialog(){
+  android.content.SharedPreferences sp = getSharedPreferences("wellphone", MODE_PRIVATE);
+  LinearLayout box = new LinearLayout(this);
+  box.setOrientation(LinearLayout.VERTICAL);
+  box.setPadding(dp(16), dp(8), dp(16), 0);
+  final EditText eDoubao = new EditText(this);
+  eDoubao.setSingleLine(true);
+  eDoubao.setHint("豆包（火山方舟）key，跑主循环看画面");
+  eDoubao.setText(sp.getString("api_key", ""));
+  final EditText eDeep = new EditText(this);
+  eDeep.setSingleLine(true);
+  eDeep.setHint("DeepSeek key，跑意图路由和问答");
+  eDeep.setText(sp.getString("deepseek_key", ""));
+  box.addView(eDoubao); box.addView(eDeep);
+  new android.app.AlertDialog.Builder(this)
+    .setTitle("配置 API Key")
+    .setMessage("两个都存本机、不会上传。填哪个就用哪个，改完立即生效。")
+    .setView(box)
+    .setPositiveButton("保存", (d, w) -> {
+      String kd = eDoubao.getText().toString().trim();
+      String kp = eDeep.getText().toString().trim();
+      sp.edit().putString("api_key", kd).putString("deepseek_key", kp).apply();
+      agent.applyLlmConfig(this);
+      refreshBrainBtn();
+      log("豆包 key：" + (kd.isEmpty() ? "空" : kd.length() + " 字符")
+        + " / DeepSeek key：" + (kp.isEmpty() ? "空" : kp.length() + " 字符"));
+      toast("已保存");
+    })
+    .setNeutralButton("手动填端口", (d, w) -> showManualPairDialog())
+    .setNegativeButton("取消", null)
+    .show();
+ }
+
+ /** 兜底：某些 ROM 上 mDNS 不可靠，允许手填端口 */
+ private void showManualPairDialog(){
+  LinearLayout box = new LinearLayout(this);
+  box.setOrientation(LinearLayout.VERTICAL);
+  box.setPadding(dp(16), dp(10), dp(16), 0);
+  final EditText ePair = new EditText(this); ePair.setHint("配对端口");
+  final EditText eCode = new EditText(this); eCode.setHint("配对码");
+  final EditText eConn = new EditText(this); eConn.setHint("连接端口");
+  for(EditText e : new EditText[]{ePair, eCode, eConn}){ e.setSingleLine(true); box.addView(e); }
+  TextView tip = new TextView(this); tip.setTextSize(11);
+  tip.setText("配对端口/配对码来自「使用配对码配对设备」弹窗；\n连接端口来自同一页面的『IP 地址和端口』。");
+  box.addView(tip);
+  new android.app.AlertDialog.Builder(this)
+    .setTitle("手动配对")
+    .setView(box)
+    .setPositiveButton("配对", (d, w) -> {
+      int pp, cp;
+      try{ pp = Integer.parseInt(ePair.getText().toString().trim()); }catch(Throwable t){ toast("配对端口不对"); return; }
+      try{ cp = Integer.parseInt(eConn.getText().toString().trim()); }catch(Throwable t){ cp = 5555; }
+      final int pairPort = pp, connPort = cp;
+      final String code = eCode.getText().toString().trim();
+      log("手动配对 127.0.0.1:" + pairPort + " conn " + connPort);
+      new Thread(() -> {
+        if(!BuiltinShell.pair("127.0.0.1", pairPort, code, this::logSafe)) return;
+        BuiltinShell.saveConn(this, "127.0.0.1", connPort);
+        String cmd = "CLASSPATH="
+          + quote(getApplicationInfo().sourceDir) + " WELLPHONE_SOCKET_PORT=" + OwnedDisplay.BUILTIN_PORT
+          + " app_process /system/bin local.wellphone.remote.DisplayHost";
+        BuiltinShell.runDaemon("127.0.0.1", connPort, cmd, this::logSafe);
+        h.post(() -> { try{ ensureDisplay(); }catch(Throwable t){} });
+      }).start();
+    })
+    .setNegativeButton("取消", null)
+    .show();
+ }
+
+ /** 内置配对：只在本 App 内完成无线调试配对，不装 Shizuku、不用电脑。
+  *  adb 协议实现取自 RikkaApps/Shizuku（Apache-2.0）。 */
+ private void showBuiltinPairDialog(){
+  // 不用填端口：mDNS 自动发现。配对码在通知栏输入（切走系统设置页会刷新配对码）。
+  new android.app.AlertDialog.Builder(this)
+    .setTitle("内置配对（1 分钟）")
+    .setMessage(
+      "1. 打开 系统设置 → 开发者选项 → 无线调试，并打开它\n"
+    + "2. 点「使用配对码配对设备」，屏幕上会出现 6 位配对码\n"
+    + "3. 下拉通知栏，在「Wellphone 内置配对」那条通知里直接输入配对码\n\n"
+    + "⚠️ 不要切回这个 App 输入——切走那个页面配对码会刷新。用通知栏输入就不会。")
+    .setPositiveButton("开始搜索", (d, w) -> {
+      log("开始内置配对：mDNS 搜索 _adb-tls-pairing._tcp …");
+      try{ PairShellService.start(this); }catch(Throwable t){ log("启动配对服务失败：" + t); }
+    })
+    .setNeutralButton("手动填端口", (d, w) -> showManualPairDialog())
+    .setNegativeButton("取消", null)
+    .show();
+ }
+
+ 
+ private String quote(String s){ return "'" + s.replace("'", "'\\''") + "'"; }
+
+ /** 内置通道版：用 adb shell 写 settings 打开无障碍（逻辑与原版一致，含 null 段清洗） */
+ private boolean enableA11yByBuiltin(){
+  try{
+   String me = getPackageName() + "/" + AgentService.class.getName();
+   String cur = BuiltinShell.execFromSaved(this, "settings get secure enabled_accessibility_services");
+   java.util.LinkedHashSet<String> segs = new java.util.LinkedHashSet<String>();
+   for(String seg : cur.split("[\\r\\n:]+")){
+    String t = seg.trim();
+    if(t.isEmpty() || !t.contains("/") || t.startsWith("null")) continue;
+    segs.add(t);
+   }
+   if(segs.contains(me)){ logSafe("③ 无障碍已在列表中，等待绑定…"); }
+   else {
+    segs.add(me);
+    StringBuilder j = new StringBuilder();
+    for(String x : segs){ if(j.length()>0) j.append(':'); j.append(x); }
+    BuiltinShell.runShellFromSaved(this,
+      "settings put secure enabled_accessibility_services '" + j + "'; settings put secure accessibility_enabled 1",
+      this::logSafe);
+   }
+   for(int i=0;i<10;i++){                       // 等绑定，最多 5 秒
+    if(AgentService.instance != null) return true;
+    Thread.sleep(500);
+   }
+   return AgentService.instance != null;
+  }catch(Throwable t){ return false; }
+ }
+
+ /** 内置通道分支的收尾：无障碍必须开，否则任务跑不了。
+  *  （原来这里直接 return，把 ③ 无障碍 和 ensureService 都跳过了，导致"虚拟屏就绪但任务不动"） */
+ private void finishBootstrapBuiltin(){
+  boolean a11y = enableA11yByShell();
+  logSafe(a11y ? "③ 无障碍服务已自动开启（内置通道）" : "③ 无障碍没开成，请在 设置→无障碍→Wellphone 手动开一次");
+  ensureService();
+  h.post(() -> { if(agent.displayId > 0) refreshControlNotification(); });
+ }
+
  /** 步数上限，默认 40，范围 20~50 */
  int stepsLimit(){
   int v = getSharedPreferences("wellphone", MODE_PRIVATE).getInt("max_steps", 40);
@@ -833,6 +1267,34 @@ public class MainActivity extends Activity {
   if(AgentService.instance == null || agent.displayId <= 0) h.postDelayed(() -> bootstrap(), 1200);
   // 回到前台时只收回 View 焦点，不主动弹键盘（那样太烦）
   try{ getWindow().getDecorView().requestFocus(); }catch(Throwable t){}
+  renderSkills();   // 任务跑完沉淀的新技能，回来就能在列表里看到
+ }
+
+ // ===== 技能库（程序化记忆）=====
+ // 演示价值最大的一块：让用户亲眼看到"它学会了什么"。
+ private LinearLayout skillList;
+ private TextView skillTitle;
+ private void renderSkills(){
+  if(skillList == null) return;
+  skillList.removeAllViews();
+  List<SkillStore.Skill> ss = SkillStore.all(this);
+  if(skillTitle != null) skillTitle.setText("程序化记忆 · " + ss.size() + " 条技能");
+  if(ss.isEmpty()){
+   TextView t = new TextView(this);
+   t.setTextSize(11); t.setTextColor(C_HINT);
+   t.setText("还没有技能。完成一次任务后，它走过的路会自动存成技能，下次同类任务直接复用、不再逐步推理。");
+   skillList.addView(t);
+   return;
+  }
+  for(SkillStore.Skill s : ss){
+   TextView t = new TextView(this);
+   t.setTextSize(11); t.setTextColor(C_TEXT);
+   t.setPadding(0, dp(2), 0, dp(2));
+   String state = s.ok >= 2 ? "已掌握" : "观察中（还差 " + (2 - s.ok) + " 次成功转正）";
+   t.setText("· " + s.label + "\n   " + s.pkg + " · " + s.steps.size() + " 步 · 成功 "
+     + s.ok + " 次 · " + state);
+   skillList.addView(t);
+  }
  }
  /** 记忆区渲染成条目列表：每行「类型 叫法 → 实际值（备注）」+ 一个 × */
  private void renderMemory(){
@@ -889,17 +1351,23 @@ public class MainActivity extends Activity {
       renderMemory();
       toast(ok ? "已保存" : "JSON 格式不对，没有保存");
     })
+    .setNeutralButton("手动填端口", (d, w) -> showManualPairDialog())
     .setNegativeButton("取消", null)
     .show();
  }
 
+ 
+
  private Button smallBtn(String text, View.OnClickListener fn){
   Button b = new Button(this);
-  b.setText(text); b.setTextSize(10); b.setTextColor(Color.WHITE);
-  b.setBackgroundColor(Color.parseColor("#5a5a6e"));
-  b.setPadding(dp(6), 0, dp(6), 0);
+  b.setText(text); b.setTextSize(10); b.setTextColor(C_SUB);
+  b.setAllCaps(false);
+  b.setMinHeight(0); b.setMinimumHeight(0);
+  b.setBackground(pill(0xFFF3E9DF, dp(8)));        // 浅色药丸，别再是块深色砖
+  try{ b.setStateListAnimator(null); }catch(Throwable ig){}
+  b.setPadding(dp(10), 0, dp(10), 0);
   LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-    ViewGroup.LayoutParams.WRAP_CONTENT, dp(26));
+    ViewGroup.LayoutParams.WRAP_CONTENT, dp(28));
   lp.setMargins(dp(4), dp(4), 0, 0);
   b.setLayoutParams(lp);
   b.setOnClickListener(fn);
@@ -928,12 +1396,67 @@ public class MainActivity extends Activity {
   }catch(Throwable t){}
  }
 
+ // ===== 设计系统：延续图标（橙 + 白卡 + 大圆角）=====
+ // 全部用代码构造 drawable，不引额外图片资源，也不碰任何业务逻辑。
+ static final int C_BG     = 0xFFFFF7F0;   // 极浅暖橙底
+ static final int C_CARD   = 0xFFFFFFFF;
+ static final int C_EDGE   = 0xFFF2E3D3;   // 卡片描边
+ static final int C_ACCENT = 0xFFF97316;   // 图标橙
+ static final int C_TEXT   = 0xFF2B2520;
+ static final int C_SUB    = 0xFF8B7F72;
+ static final int C_HINT   = 0xFFB6A99B;
+
+ /** 按下态：整体压暗一点，给个即时反馈（原来是一块死色，按下去毫无反应） */
+ private static int darker(int c){
+  int r=(int)(((c>>16)&0xff)*0.86), g=(int)(((c>>8)&0xff)*0.86), b=(int)((c&0xff)*0.86);
+  return 0xFF000000 | (r<<16) | (g<<8) | b;
+ }
+ private static android.graphics.drawable.GradientDrawable round(int fill, float r){
+  android.graphics.drawable.GradientDrawable d=new android.graphics.drawable.GradientDrawable();
+  d.setColor(fill); d.setCornerRadius(r); return d;
+ }
+ private static android.graphics.drawable.GradientDrawable roundEdge(int fill, int stroke, float r, int w){
+  android.graphics.drawable.GradientDrawable d=new android.graphics.drawable.GradientDrawable();
+  d.setColor(fill); d.setCornerRadius(r); d.setStroke(w, stroke); return d;
+ }
+ /** 圆角按钮 + 按下变色 */
+ private static android.graphics.drawable.StateListDrawable pill(int normal, float r){
+  android.graphics.drawable.StateListDrawable s=new android.graphics.drawable.StateListDrawable();
+  s.addState(new int[]{android.R.attr.state_pressed}, round(darker(normal), r));
+  s.addState(new int[]{}, round(normal, r));
+  return s;
+ }
+ /** 白色圆角卡片，带一个可选的小标题——把一堆按钮按用途分组，界面才有结构 */
+ private LinearLayout card(String label){
+  LinearLayout box=new LinearLayout(this);
+  box.setOrientation(LinearLayout.VERTICAL);
+  box.setBackground(roundEdge(C_CARD, C_EDGE, dp(16), dp(1)));
+  int p=dp(10); box.setPadding(p,p,p,p);
+  LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(
+    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+  lp.bottomMargin=dp(10);
+  box.setLayoutParams(lp);
+  if(label != null && !label.isEmpty()){
+   TextView t=new TextView(this);
+   t.setText(label); t.setTextSize(12); t.setTextColor(C_SUB);
+   t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+   t.setPadding(dp(4),0,0,dp(2));
+   box.addView(t);
+  }
+  return box;
+ }
+
  private Button btn(String text, String color, View.OnClickListener fn){
   Button b = new Button(this);
   b.setText(text); b.setTextColor(Color.WHITE);
-  b.setBackgroundColor(Color.parseColor(color));
-  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1);
-  lp.setMargins(dp(4),dp(8),dp(4),dp(8));
+  b.setTextSize(13);
+  b.setAllCaps(false);
+  b.setMinHeight(0); b.setMinimumHeight(0);
+  b.setPadding(dp(6),0,dp(6),0);
+  b.setBackground(pill(Color.parseColor(color), dp(12)));
+  try{ b.setStateListAnimator(null); }catch(Throwable ig){}   // 去掉默认抬升阴影
+  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(44), 1);
+  lp.setMargins(dp(3),dp(4),dp(3),dp(4));
   b.setLayoutParams(lp); b.setOnClickListener(fn);
   return b;
  }

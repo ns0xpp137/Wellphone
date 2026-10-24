@@ -16,3 +16,25 @@ AndroidManifest.release.xml
 manifest_rel.xml
 probe.apk
 backup-before-fix-*/
+
+# 编译中间产物
+classes*/
+dex*/
+libs/*.jar
+libs/*.so
+libs/adbdex/
+ctest/
+
+# ★ 含密钥的配置和真机日志，绝不入库
+llm.json
+llm-*.json
+log*.txt
+*-log*.txt
+run-log.txt
+ui-all.txt
+shot-debug.txt
+
+# 随手记的调试文件/截图
+111.txt
+jc*.txt
+Screenshot_*.jpg

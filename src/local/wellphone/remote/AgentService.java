@@ -101,11 +101,17 @@ public class AgentService extends AccessibilityService {
  }
  /** 调试：截图路线/尺寸落盘（logcat 在本 ROM 读不到） */
  static void shotDebug(String s){
+  String line = System.currentTimeMillis() + " " + s + "\n";
   try{
    java.io.File f = App.f("shot-debug.txt");
    java.io.FileWriter fw = new java.io.FileWriter(f, true);
-   fw.write(System.currentTimeMillis() + " " + s + "\n");
-   fw.close();
+   fw.write(line); fw.close();
+  }catch(Throwable t){}
+  // 同时进 run-log：排错时只需要给一个文件，别让人在两处找
+  try{
+   java.io.File f = App.f("run-log.txt");
+   java.io.FileWriter fw = new java.io.FileWriter(f, true);
+   fw.write(line); fw.close();
   }catch(Throwable t){}
  }
 
@@ -350,7 +356,8 @@ public class AgentService extends AccessibilityService {
   }
   // 树被藏/读不到 → shell 原始触摸注入（whale 同款，不依赖节点树）
   // input -d 本身就是按屏寻址的，不会溢出到用户主屏，所以不必再卡 targetPackage
-  if(displayId > 0 && ShellChannel.ready()){
+  // 内置通道（adb 配对）同样能 input -d，别只认 Shizuku
+  if(displayId > 0 && ShellChannel.available()){
    boolean ok = ShellChannel.tap(displayId, x, y);
    Log.i(TAG, "clickAt(shell) "+x+","+y+" -> "+ok);
    return ok;

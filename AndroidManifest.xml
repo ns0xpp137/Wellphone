@@ -1,13 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.wellphone.remote">
  <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="33"/>
  <uses-permission android:name="android.permission.INTERNET"/>
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+ <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+ <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
  <uses-permission android:name="android.permission.VIBRATE"/>
  <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"/>
  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
  <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
  <uses-permission android:name="moe.shizuku.manager.permission.API_V23"/>
  <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries>
- <application android:label="Wellphone" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
+ <application android:label="Wellphone" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
   <activity android:name="local.wellphone.remote.MainActivity" android:exported="true">
    <intent-filter>
     <action android:name="android.intent.action.MAIN"/>
@@ -24,6 +27,10 @@
   <!-- 必须 exported，且要 intent-filter：只靠 action+package 是隐式广播，
        Android 8+ 起 manifest 接收器收不到隐式广播（表现为"按了完全没反应"）。
        现在 PendingIntent 用显式组件，intent-filter 再兜一层。 -->
+  <service android:name="local.wellphone.remote.PairShellService"
+     android:exported="false" android:foregroundServiceType="dataSync"/>
+  <!-- 必须 exported：非导出接收器收不到通知栏 PendingIntent 经系统投递的广播（踩过） -->
+  <receiver android:name="local.wellphone.remote.PairCodeReceiver" android:exported="true"/>
   <receiver android:name="local.wellphone.remote.ControlReceiver" android:exported="true">
    <intent-filter><action android:name="local.wellphone.CONTROL"/></intent-filter>
   </receiver>

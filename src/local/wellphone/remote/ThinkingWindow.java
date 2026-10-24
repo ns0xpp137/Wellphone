@@ -46,6 +46,8 @@ public class ThinkingWindow {
 
  public boolean isShown(){ return shown && root != null && root.isAttachedToWindow(); }
  public boolean isUserHidden(){ return userHidden; }
+ /** 用户再次发起任务时调用：清掉"被收起"状态，让思考窗能重新显示 */
+ public void clearUserHidden(){ userHidden = false; }
 
  public void setOnSendListener(OnSendListener l){ sendListener = l; }
  /** 通知栏把窗口拉起来时不知道按钮回调，事后补上 */
@@ -90,7 +92,8 @@ public class ThinkingWindow {
    wm = (WindowManager)appCtx.getSystemService(Context.WINDOW_SERVICE);
    root = new LinearLayout(appCtx);
    root.setOrientation(LinearLayout.VERTICAL);
-   root.setBackgroundColor(Color.parseColor("#f21e1e2e"));
+   // 圆角靠背景 drawable 画：WindowManager 给的窗口是矩形，圆角外保持透明就行
+   root.setBackground(Ui.roundEdge(Ui.W_BG, Ui.W_EDGE, dp(16), dp(1)));
    int p = dp(6);
    root.setPadding(p, p, p, p);
 
@@ -100,9 +103,9 @@ public class ThinkingWindow {
    input = new EditText(appCtx);
    input.setHint("输入任务…");
    input.setTextSize(11);
-   input.setTextColor(Color.parseColor("#e8e8e8"));
-   input.setHintTextColor(Color.parseColor("#888888"));
-   input.setBackgroundColor(Color.parseColor("#2a2a3a"));
+   input.setTextColor(Ui.W_TEXT);
+   input.setHintTextColor(Ui.W_HINT);
+   input.setBackground(Ui.roundEdge(Ui.W_PANEL, Ui.W_EDGE, dp(10), dp(1)));
    input.setPadding(dp(8), dp(2), dp(8), dp(2));
    input.setSingleLine(true);
    LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(0, dp(38), 1);
@@ -110,8 +113,7 @@ public class ThinkingWindow {
    sendBtn = new Button(appCtx);
    sendBtn.setText("发送");
    sendBtn.setTextSize(11);
-   sendBtn.setTextColor(Color.WHITE);
-   sendBtn.setBackgroundColor(Color.parseColor("#1d9e75"));
+   Ui.styleButton(sendBtn, Ui.ACCENT, Color.WHITE, dp(10));   // 主操作用图标橙
    LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(52), dp(38));
    slp.setMargins(dp(4), 0, 0, 0);
    sendBtn.setLayoutParams(slp);
@@ -124,8 +126,10 @@ public class ThinkingWindow {
    header = new TextView(appCtx);
    header.setText("≡ 思考流");
    header.setTextSize(11);
-   header.setTextColor(Color.parseColor("#8be9b8"));
-   header.setPadding(dp(6), dp(8), dp(6), dp(4));
+   header.setTextColor(Ui.ACCENT);
+   header.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+   header.setBackground(Ui.round(Ui.W_PANEL, dp(8)));
+   header.setPadding(dp(8), dp(6), dp(8), dp(6));
    // 标题栏是主要拖拽把手：不能只 setOnClickListener（那样会吞掉触摸事件，整窗拖不动）。
    // 这里让它走和根视图同一套 drag 逻辑，松手时若没发生位移才当点击 → 折叠/展开。
    header.setOnTouchListener((v, ev) -> handleDrag(ev, true));
@@ -133,18 +137,19 @@ public class ThinkingWindow {
    // 状态行：App 里那个"状态：…"同步到这里，免得出错还得切回 App 看
    statusLine = new TextView(appCtx);
    statusLine.setTextSize(11);
-   statusLine.setTextColor(Color.parseColor("#dddddd"));
-   statusLine.setBackgroundColor(Color.parseColor("#2a2a3a"));
-   statusLine.setPadding(dp(6), dp(3), dp(6), dp(3));
+   statusLine.setTextColor(Ui.W_TEXT);
+   statusLine.setBackground(Ui.round(Ui.W_PANEL, dp(8)));
+   statusLine.setPadding(dp(8), dp(3), dp(8), dp(3));
    statusLine.setSingleLine(true);
    statusLine.setText("待机");
    root.addView(statusLine);
 
    body = new TextView(appCtx);
    body.setTextSize(10);
-   body.setTextColor(Color.parseColor("#e8e8e8"));
+   body.setTextColor(Ui.W_TEXT);
    body.setLineSpacing(2, 1);
    body.setText("等待任务…");
+   body.setPadding(dp(4), dp(4), dp(4), 0);
    scroll = new ScrollView(appCtx);
    scroll.addView(body);
    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(220), dp(120));
@@ -156,21 +161,21 @@ public class ThinkingWindow {
    btnRow.setOrientation(LinearLayout.HORIZONTAL);
    stopBtn = new Button(appCtx);
    stopBtn.setText("停止"); stopBtn.setTextSize(11);
-   stopBtn.setTextColor(Color.WHITE); stopBtn.setBackgroundColor(Color.parseColor("#a32d2d"));
+   Ui.styleButton(stopBtn, 0xFFB03A3A, Color.WHITE, dp(10));
    LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(0, dp(34), 1);
    b1.setMargins(0, dp(4), dp(4), 0);
    stopBtn.setLayoutParams(b1);
    stopBtn.setOnClickListener(onStop);
    takeBtn = new Button(appCtx);
    takeBtn.setText("接管"); takeBtn.setTextSize(11);
-   takeBtn.setTextColor(Color.WHITE); takeBtn.setBackgroundColor(Color.parseColor("#ba7517"));
+   Ui.styleButton(takeBtn, Ui.ACCENT_D, Color.WHITE, dp(10));
    LinearLayout.LayoutParams b2 = new LinearLayout.LayoutParams(0, dp(34), 1);
    b2.setMargins(dp(4), dp(4), 0, 0);
    takeBtn.setLayoutParams(b2);
    takeBtn.setOnClickListener(onTake);
    backBtn = new Button(appCtx);
    backBtn.setText("返回后台"); backBtn.setTextSize(11);
-   backBtn.setTextColor(Color.WHITE); backBtn.setBackgroundColor(Color.parseColor("#085041"));
+   Ui.styleButton(backBtn, 0xFF0F6E56, Color.WHITE, dp(10));
    LinearLayout.LayoutParams b3 = new LinearLayout.LayoutParams(0, dp(34), 1);
    b3.setMargins(dp(4), dp(4), 0, 0);
    backBtn.setLayoutParams(b3);
@@ -182,6 +187,32 @@ public class ThinkingWindow {
    });
    btnRow.addView(stopBtn); btnRow.addView(takeBtn); btnRow.addView(backBtn);
    root.addView(btnRow);
+
+   // ── 小控制行：两个"先收起来"的开关 ──
+   // 这两个窗的开关原本只在 App 里，但演示时经常要临时收掉某一个（挡住画面了、
+   // 或者要让观众看一眼主屏），切回 App 再点太笨——直接放悬浮窗上。
+   LinearLayout hideRow = new LinearLayout(appCtx);
+   hideRow.setOrientation(LinearLayout.HORIZONTAL);
+   final Button btnHideMirror = new Button(appCtx);
+   btnHideMirror.setTextSize(10);
+   Ui.styleButton(btnHideMirror, Ui.W_PANEL, Ui.W_SUB, dp(8));
+   LinearLayout.LayoutParams h1 = new LinearLayout.LayoutParams(0, dp(28), 1);
+   h1.setMargins(0, dp(4), dp(4), 0);
+   btnHideMirror.setLayoutParams(h1);
+   btnHideMirror.setText(MirrorWindow.get().isShown() ? "隐藏镜像窗" : "显示镜像窗");
+   btnHideMirror.setOnClickListener(v -> {
+    boolean on = MirrorWindow.get().toggle(appCtx);
+    btnHideMirror.setText(on ? "隐藏镜像窗" : "显示镜像窗");
+   });
+   Button btnHideSelf = new Button(appCtx);
+   btnHideSelf.setText("收起悬浮窗"); btnHideSelf.setTextSize(10);
+   Ui.styleButton(btnHideSelf, Ui.W_PANEL, Ui.W_SUB, dp(8));
+   LinearLayout.LayoutParams h2 = new LinearLayout.LayoutParams(0, dp(28), 1);
+   h2.setMargins(dp(4), dp(4), 0, 0);
+   btnHideSelf.setLayoutParams(h2);
+   btnHideSelf.setOnClickListener(v -> hide());
+   hideRow.addView(btnHideMirror); hideRow.addView(btnHideSelf);
+   root.addView(hideRow);
 
    params = new WindowManager.LayoutParams(
      dp(232), WindowManager.LayoutParams.WRAP_CONTENT,
@@ -288,6 +319,8 @@ public class ThinkingWindow {
     float dx = ev.getRawX() - downX, dy = ev.getRawY() - downY;
     if(Math.abs(dx) > 12 || Math.abs(dy) > 12) dragging = true;
     if(dragging){
+     // 拖动期间停掉镜像窗的帧刷新（两个 overlay 同时更新会被合成抖成闪烁）
+     MirrorWindow.get().setPollPaused(true);
      // 别拖出屏幕外，否则用户找不回来
      int sw = appCtx.getResources().getDisplayMetrics().widthPixels;
      int sh = appCtx.getResources().getDisplayMetrics().heightPixels;
@@ -300,6 +333,7 @@ public class ThinkingWindow {
    case MotionEvent.ACTION_CANCEL:
     if(tapToToggle && !dragging) toggle();
     dragging = false;
+    MirrorWindow.get().setPollPaused(false);   // 松手立刻恢复
     return true;
   }
   return false;

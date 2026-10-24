@@ -1,8 +1,10 @@
-# Wellphone
+# 机灵 / Wellphone
 
 **让 agent 在你手机的后台工作区里替你办事——你照常用手机，需要你的时候，它把正在操作的那个界面整个搬到你面前。**
 
 不是云手机，不是第二台设备，不是无障碍抢前台。是同一台手机上，一块你看不见的屏幕。
+
+> App 名「机灵」，仓库沿用早期工程名 Wellphone。
 
 ---
 
@@ -28,7 +30,7 @@ Wellphone 的做法是：**给 agent 开一块它自己的屏幕**。
 
 协同模式是给"等到某个条件就出手"这类需求准备的。相机取景、直播画面这些东西只存在于你的屏幕上，虚拟工作区里没有——所以必须能看着你的屏幕干活。
 
-## 三、四个关键判断
+## 三、六个关键判断
 
 这是这个项目最值钱的部分，不是功能列表。
 
@@ -76,6 +78,51 @@ am start -n cn.nubia.notepad.preset/cn.nubia.notepad.NotePadEditorActivity
 最终日志：`点快门没拍成 → 补发系统相机键，结果：已拍下 IMG_...jpg`
 
 > 相机快门用屏幕坐标点不稳（模型给的归一化坐标换算后总差一截，无障碍 ACTION_CLICK 也未必生效），**系统相机键 `input keyevent 27` 一定能拍下去**。
+
+### 5. 意图交给模型判断，不靠关键词 if-else
+
+「用户这句话是任务还是问题？要不要看他的屏幕？」——这类判断早期用关键词匹配做，代价很直接：
+
+```java
+String[] keys = {"当", "一旦", "出现", "就拍", ...};
+```
+
+「打开微信，找到赵禹哲的聊天记录，里面**出现**任意商品就去京东买」命中了"出现"，被判成需要盯着用户屏幕的监控任务，直接被拦下要求开主屏监控——而它只是个普通的跨应用任务。
+
+改成一次**纯文本 LLM 调用**做路由，返回严格 JSON：
+
+```json
+{"type":"task|question|correction|control", "mode":"background|main", "app":"...", "reply":"..."}
+```
+
+- `question`（只是提问）→ 直接回答，**不建屏、不截图、不调视觉模型**
+- `task` → 进主循环，`mode` 决定用工作区还是主屏监控
+- `correction` → 写进记忆区
+- `control`（停止/接管）→ 直接执行，不用问模型
+
+**关键工程决策**：模型没说话（没 key / 超时 / 返回非法 JSON）时**回退到规则**。路由在链路最前面，它挂了不能让整个 App 不能用人。
+
+顺带一个成本上的收益：路由一次几十 token，主循环一次几千 token，用最便宜的模型做最简单的事。
+
+### 6. 程序化记忆：把走过的路沉淀成技能
+
+agent 每次都从零推理是浪费——手机上的操作路径高度可复用（打开 App → 点搜索 → 输入 → 点搜索）。
+
+所以任务**真的做成了**之后（成功门控，只在判 finish 那一刻），把这一轮走通的动作序列存成技能：
+
+```
+技能 = { 应用, 动词, 起始页面指纹, 动作序列, 成功次数, 失败次数 }
+```
+
+下次同类任务进来，先检索技能库，**命中就照着走、跳过模型调用**。
+
+三个必须守住的点：
+
+- **技能是带参数的函数，不是固定脚本。** 动作序列里用 `{q}` 占位。否则"搜火锅"存进去，下次"搜烤肉"会输入火锅。
+- **成功两次才转正。** 手机 App 会改版、会弹权限框，一次成功可能只是运气（Voyager 在 Minecraft 里一次就写，因为环境是确定的）。
+- **优雅降级。** 命中也要每步校验，偏离立刻放弃、交还模型，连错两次自动淘汰——这就是"缓存失效"的处理。
+
+对应的是 Voyager（2023）的技能库思路，以及 Agent S4「Evolving Agent Interfaces」（2026）里"让 agent 从任务经验演化它使用的接口"——沉淀出来的技能，本质就是给模型新增了一个高层动作。
 
 ## 四、硬骨头
 
@@ -141,6 +188,30 @@ JsonMappingException: Illegal unquoted character ((CTRL-CHAR, code 9))
 
 改成：返回 `unsupported`，把可用动作列表整段回给模型，**不计失败、不切模型**。
 
+### 内置 shell 通道：两条血泪
+
+免 Root 靠的是自己实现 adb 客户端（协议取自 Shizuku，Apache-2.0）。这里踩了两个坑，都表现为"命令莫名返回 null"，查起来极其费劲：
+
+**① 绝不能在主线程调用。** 它是网络连接，Android 会直接抛 `NetworkOnMainThreadException`：
+
+```
+点「接管」→ takeover() 在主线程 → preGrant()/takeoverMoveToMain() → 走 shell
+                                                    ↓
+                                   NetworkOnMainThreadException
+                                                    ↓
+                      execFast 返回 null → 找不到任务 → 兜底"新开实例"
+```
+
+用户看到的就是"接管又开了个新应用、操作记录全丢"。凡是调用 shell 的地方都要挪进后台线程。
+
+**② 连接不能复用。** 为了省握手做过一次"复用共享 AdbClient"的优化，结果 DisplayHost 的常驻进程占着那条连接的 shell 流，复用导致协议错乱（`not A_WRTE` / `EOFException`），**所有后续命令全部失败**——表现为虚拟屏上拉不起任何应用。改成每次新建、用完即关才对。
+
+### 编号框画在了错误的坐标系
+
+模型"认得出按钮却点不准"，查了很久发现：Set-of-Mark 的编号框用的是**屏幕像素**（0..1216），却直接画在**只有 720×1592 的缩略截图**上——框大半落到画布外，剩下的也全错位。模型照抄的是错框的中心。
+
+**画布坐标和目标坐标不在同一尺度时，一定要显式换算。** 这类 bug 的阴险之处在于"识别全对、就是点不准"，很容易被误判成模型能力不行。
+
 ## 五、实测记录
 
 | 场景 | 结果 |
@@ -174,11 +245,30 @@ python build.py release   # 正式版 1.2   → Wellphone-1.2.apk
 
 依赖：
 
-- Android 10（API 30）+
+- Android 11（API 30）+
 - [Shizuku](https://shizuku.rikka.app/) —— 提供无 root 的 shell 能力
 - 视觉大模型 API（Anthropic 协议 / OpenAI 协议，App 内两套并存）
 
-首次使用：打开 App → 「一键准备」→ 按提示完成一次授权，之后全自动。
+### 给使用者的安装步骤
+
+> ⚠️ **必须先装 Shizuku**，这是硬依赖——Wellphone 靠它拿到无 root 的 shell 能力（跨屏启动、注入触摸、读无障碍配置都依赖这个）。没有 Shizuku，App 只能打开界面，执行不了任何任务。
+
+1. 安装 [Shizuku](https://github.com/RikkaApps/Shizuku)（开源，免费）
+2. 按 Shizuku 的引导启动它（需开启「开发者选项 → 无线调试」，用配对码配对一次）
+3. 安装 Wellphone APK，打开 → 点「**一键准备**」
+4. Shizuku 弹出授权请求 → 点「**允许**」
+5. 之后全部自动：无障碍服务会在 App 内自动绑定，虚拟屏自动创建
+
+一次性成本：Shizuku 的首次配对要用户手动做一次（Android 的安全边界，无法绕过）。**配对成功后，后续每次打开 Wellphone 都是全自动的。**
+
+### 分发 APK 时注意
+
+用微信/QQ 直接传 APK 时，对方收到的文件名常被改成 `.apk.1`（传输方为防止误安装加的后缀），无法直接点击安装。解决办法：
+
+- 接收方把文件名改回 `.apk` 即可
+- 或者发送前**打包成 zip**（zip 不会被改名，也更稳妥）
+
+另外 Android 11+ 才支持。
 
 ### 自动化钩子（调试/演示用）
 
@@ -191,28 +281,26 @@ adb shell am start -n <pkg>/local.wellphone.remote.MainActivity \
 
 ## 八、配置 API key
 
-源码里**不带任何密钥**——`PROVIDERS` 的 `key` 是空字符串，运行时从手机上的 `llm.json` 注入（免重装，改完立即生效）。
+源码里 **不带任何密钥** —— `PROVIDERS` 的 `key` 是空字符串，运行时注入。
 
-写到 App 的外部文件目录（正式版是 `local.wellphone.remote`，开发版是 `local.wellphone.dev`）：
+**最省事的办法：App 内点「API Key」按钮**，两个输入框分别填：
 
-```bash
-adb shell 'cat > /sdcard/Android/data/local.wellphone.remote/files/llm.json' <<'EOF'
-{"doubao":{"model":"doubao-seed-2-1-lite-260915","key":"你的key"}}
-EOF
-```
+| 输入框 | 用在哪 | 为什么 |
+|---|---|---|
+| 豆包（火山方舟） | 主循环——看截图、输出动作 | 需要视觉能力 |
+| DeepSeek | 意图路由、回答问题 | 纯文本就够，便宜且快 |
 
-支持多 provider 与模型覆盖，格式：
+两个都只存本机 `SharedPreferences`，不会上传。填哪个就用哪个，改完立即生效。
 
-```json
-{
-  "doubao": {"model": "doubao-seed-2-1-lite-260915", "key": "..."},
-  "glm":    {"model": "glm-4.6v-flashx",            "key": "..."}
-}
-```
+> 早期版本靠写 `llm.json` 到 `/sdcard/Android/data/<包名>/files/` 注入。
+> **实测在本机上 App 读不到这个目录**（adb 能往里写、App 读不出来），所以改成走 App 界面。
+> 文件这条路现在仍保留作兜底，但不推荐用。
 
-没配 key 时 App 不会默默失败——会直接提示「未配置 API key」并给出这个文件路径（否则会一路 401 降级，看不出真正原因）。
+填完后点「大脑」按钮可以在 doubao / deepseek 之间切换主循环用谁，用来实测对比谁更快更准。
 
-`.gitignore` 已包含 `*.apk`、`*.jks`、`classes*/`、`dex*/`、`variant/`、`build.out`。
+没配 key 时 App 不会默默失败——会直接提示「未配置 API key」并指出去哪里填（否则会一路 401 降级，看不出真正原因）。
+
+`.gitignore` 已包含 `*.apk`、`*.jks`、`classes*/`、`dex*/`、`variant/`、`build.out`，以及 **含密钥的 `llm*.json` 和真机日志**。
 
 ## 九、项目结构
 
@@ -227,6 +315,11 @@ src/local/wellphone/remote/
   ThinkingWindow     悬浮思考流 + 状态行
   MirrorWindow       主屏角落的工作区镜像
   MemoryStore        记忆区（应用别名/直达页/偏好/避坑/用户教导）
+  SkillStore         程序化记忆（技能库）：沉淀并检索可复用的动作序列
+  BuiltinShell       内置 adb 通道（免 Root、免 Shizuku）
+  PairShellService   内置无线调试配对
+  PairCodeReceiver   配对码输入
+  Ui                 悬浮窗/镜像窗共用的样式工具（纯代码画 drawable）
   ControlReceiver    通知栏四个按钮
 ```
 

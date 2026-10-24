@@ -49,8 +49,145 @@ public class Agent {
     "glm-4.6v-flashx", "", false),
   // 兜底②：GLM-4.5V（区域定位 84.6% 基准同款，2元/M）
   new Provider("glm45", "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    "glm-4.5v", "", false)
+    "glm-4.5v", "", false),
+  // DeepSeek：官网说统一用 deepseek-flash，已原生支持多模态（不用带 -vision-exp 后缀）。
+  // ★ noThink=true 很关键：deepseek-flash 默认开深度推理，单步会拖到十几秒且 content 为空，
+  //   关掉后实测纯文本 1.06s、带图 0.82s。
+  new Provider("deepseek", "https://api.deepseek.com/chat/completions",
+    "deepseek-flash", "", true, "openai")
  ));
+
+ /** 意图路由/问答专用：纯文本模型，最便宜。
+  *  ★ 不放进 PROVIDERS —— 那是主循环的候选池，路由不该参与主循环的失败降级。 */
+ static final Provider ROUTER = new Provider("deepseek-txt",
+   "https://api.deepseek.com/chat/completions", "deepseek-flash", "", true, "openai");
+
+ // ===== 意图路由（替代 if-else 字符串判断）=====
+ // 以前用关键词判"是不是监控任务"，"出现"这种词在普通任务里太常见，
+ // 实测「里面出现任意商品就去京东买」被误判成监控任务。字符串判断太脆，交给模型。
+ static class Route {
+  String type = "task";          // task | question | correction | control
+  String mode = "background";    // background | main（仅 task）
+  String app = "";
+  String reply = "";             // question 时的答案
+  boolean byLLM = false;         // 是模型判的，还是规则兜底的
+ }
+ /** 只做分类，一次调用，不带图片。失败就回退到规则——路由挂了不能让整个 App 不能用人。 */
+ static Route routeIntent(String task, Logger log){
+  String t = task == null ? "" : task.trim();
+  Route r = new Route();
+  // 固定控制指令：规则判就够了，没必要花钱问模型
+  if(isControlCmd(t)){ r.type = "control"; return r; }
+  if(ROUTER.key != null && !ROUTER.key.isEmpty()){
+   try{
+    Route lr = askRouter(t);
+    if(lr != null){ lr.byLLM = true; return lr; }
+   }catch(Throwable ig){}
+  }
+  return ruleRoute(t);   // 兜底
+ }
+ private static boolean isControlCmd(String t){
+  return t.equals("停止") || t.equals("接管") || t.equals("返回后台")
+    || t.equals("隐藏镜像窗") || t.equals("收起副屏");
+ }
+ static final String ROUTER_PROMPT =
+   "你是手机 Agent 的意图路由器。判断用户输入属于哪一类，只输出一个 JSON，不要任何解释、不要 markdown。\n"
+   + "type 取值：\n"
+   + "  task —— 要让 agent 动手操作手机（打开应用、搜索、下单、发消息、填表等）\n"
+   + "  question —— 只是提问，不需要操作手机（问概念、问历史、让我解释、让我总结）\n"
+   + "  correction —— 在纠正 agent 刚才做错的动作（如“不是点那个”“点是全部那个”）\n"
+   + "type=task 时给 mode：\n"
+   + "  background —— 在后台工作区完成，不需要看用户屏幕（绝大多数情况，默认）\n"
+   + "  main —— 必须盯着用户正在看的画面才能判断时机（如“主播说到X就发弹幕”“有人出现就拍照”）\n"
+   + "type=task 时给 app：任务涉及的应用名（没有就留空）。\n"
+   + "type=question 时，把答案直接写进 reply：直接回答用户的问题，不要说“我来帮你查”之类的废话，"
+   + "也不要提你能操作手机。\n"
+   + "输出：{\"type\":\"...\",\"mode\":\"...\",\"app\":\"...\",\"reply\":\"...\"}";
+ private static Route askRouter(String task){
+  List<Map<String,Object>> msgs = new ArrayList<Map<String,Object>>();
+  Map<String,Object> sys = new HashMap<String,Object>();
+  sys.put("role","system"); sys.put("content", ROUTER_PROMPT); msgs.add(sys);
+  Map<String,Object> u = new HashMap<String,Object>();
+  u.put("role","user"); u.put("content", task); msgs.add(u);
+  String out = simpleChat(ROUTER, msgs, 600);
+  if(out == null || out.isEmpty()) return null;
+  int a = out.indexOf('{'), b = out.lastIndexOf('}');
+  if(a < 0 || b <= a) return null;
+  try{
+   org.json.JSONObject o = new org.json.JSONObject(out.substring(a, b + 1));
+   Route r = new Route();
+   String type = o.optString("type","task");
+   if(!type.equals("task") && !type.equals("question")
+      && !type.equals("correction") && !type.equals("control")) return null;
+   r.type = type;
+   r.mode = "main".equals(o.optString("mode","background")) ? "main" : "background";
+   r.app = o.optString("app","");
+   r.reply = o.optString("reply","");
+   r.byLLM = true;
+   return r;
+  }catch(Throwable t){ return null; }
+ }
+ /** 规则兜底：模型没说话（没 key / 超时 / 返回非法）时用它，保证永远有结果 */
+ private static Route ruleRoute(String t){
+  Route r = new Route();
+  if(t.contains("监控") || t.contains("盯着") || t.contains("我的屏幕")
+     || t.contains("你在看") || t.contains("主屏")) r.mode = "main";
+  return r;
+ }
+ /** 最朴素的 JSON 字符串转义（jsonStr 是实例方法，这里在静态上下文里用不了） */
+ private static String esc(String s){
+  if(s == null) return "\"\"";
+  StringBuilder b = new StringBuilder("\"");
+  for(int i = 0; i < s.length(); i++){
+   char c = s.charAt(i);
+   if(c == '"') b.append("\\\"");
+   else if(c == '\\') b.append("\\\\");
+   else if(c == '\n') b.append("\\n");
+   else if(c == '\r') b.append("\\r");
+   else if(c == '\t') b.append("\\t");
+   else if(c < 0x20) b.append(String.format("\\u%04x", (int)c));
+   else b.append(c);
+  }
+  return b.append('"').toString();
+ }
+ /** 一次不带图的纯文本调用。★ 刻意不复用 apiChat：路由失败不能污染主循环的
+  *  provider 降级状态和 apiFatal 标志，否则一次路由抖动会让整个任务跑不动。 */
+ private static String simpleChat(Provider p, List<Map<String,Object>> msgs, int maxTokens){
+  try{
+   StringBuilder body = new StringBuilder();
+   // ★ deepseek-flash 默认开深度推理：不关的话 reasoning_content 会把 token 吃光，
+   //   返回 content 是空串、finish_reason=length —— 路由就永远解析不出 JSON，
+   //   只能一路回退规则（实测：关掉后 0.58s，开着要十几秒且拿不到答案）。
+   body.append("{\"model\":\"").append(p.model).append("\",\"max_tokens\":").append(maxTokens)
+       .append(",\"temperature\":0.0,\"stream\":false,\"thinking\":{\"type\":\"disabled\"},\"messages\":[");
+   for(int i = 0; i < msgs.size(); i++){
+    if(i > 0) body.append(",");
+    Map<String,Object> m = msgs.get(i);
+    body.append("{\"role\":\"").append(m.get("role")).append("\",\"content\":")
+        .append(esc(String.valueOf(m.get("content")))).append("}");
+   }
+   body.append("]}");
+   java.net.URL u = new java.net.URL(p.url);
+   java.net.HttpURLConnection c = (java.net.HttpURLConnection)u.openConnection();
+   c.setRequestMethod("POST"); c.setDoOutput(true);
+   c.setConnectTimeout(8000); c.setReadTimeout(20000);
+   c.setRequestProperty("Authorization","Bearer " + p.key);
+   c.setRequestProperty("Content-Type","application/json");
+   c.getOutputStream().write(body.toString().getBytes("UTF-8"));
+   int code = c.getResponseCode();
+   java.io.InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+   if(is == null) return null;
+   java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+   byte[] buf = new byte[8192]; int n;
+   while((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+   is.close();
+   if(code >= 400) return null;
+   org.json.JSONObject o = new org.json.JSONObject(bo.toString("UTF-8"));
+   org.json.JSONArray arr = o.optJSONArray("choices");
+   if(arr == null || arr.length() == 0) return null;
+   return arr.optJSONObject(0).optJSONObject("message").optString("content","");
+  }catch(Throwable t){ return null; }
+ }
  volatile int curProvider = 0;
  volatile String pendingMarketSearch = null;   // 下载类任务：去应用商店里搜这个名字
  volatile String forcedPkg = null;
@@ -199,11 +336,12 @@ public class Agent {
    for(Provider p : PROVIDERS) if(p.key != null && !p.key.isEmpty()) anyKey = true;
    if(!anyKey){
     // 源码里不带 key（要开源），必须靠 llm.json 注入。没配就明确说，别让它一路 401 降级。
-    String how = "还没有配置 API key。请把下面内容写到 " +
-      (ctx.getExternalFilesDir(null) == null ? "/sdcard/Android/data/<包名>/files/llm.json"
-       : new File(ctx.getExternalFilesDir(null), "llm.json").getAbsolutePath()) +
-      "\n{\"doubao\":{\"model\":\"doubao-seed-2-1-lite-260915\",\"key\":\"你的key\"}}";
-    log.log("❌ " + how);
+    // ★ 别再让用户去写 llm.json：本机 App 读自己 Android/data/<pkg>/files 实测读不到，
+    //   照着做只会白忙一场。直接指到界面上那个按钮。
+    String how = "还没有配置 API key。点界面上的「API Key」按钮，"
+      + "把豆包（跑主循环看画面）和 DeepSeek（跑意图路由/问答）的 key 填进去即可，"
+      + "存本机、不会上传。";
+    log.log("❌ " + how + "\n（诊断：" + llmConfigMsg + "）");
     st.onState("err", "未配置 API key（见运行日志里的 llm.json 说明）");
     return "err";
    }
@@ -223,6 +361,30 @@ public class Agent {
   }
   byte[] shot = awaitShot(svc);
   if(shot == null){ log.log(svc.captureError); st.onState("err",svc.captureError); return "err"; }
+
+  // ===== 程序化记忆：动手前先问技能库 =====
+  // 命中就按上次走通的动作序列直行，跳过模型调用；任何一步失败立刻放弃、交还模型。
+  List<String> plannedSteps = null, skillTemplate = null;
+  String skillPkg = null, skillVerb = null, skillLabel = null, skillStartPage = null;
+  if(SkillStore.enabled(ctx) && currentPkg != null && !currentPkg.isEmpty()){
+   skillVerb = SkillStore.normalize(task)[0];
+   if(skillVerb != null && !skillVerb.isEmpty()){
+    SkillStore.Skill sk = SkillStore.find(ctx, currentPkg, skillVerb);
+    if(sk != null){
+     skillPkg = currentPkg; skillLabel = sk.label; skillStartPage = sk.startPage;
+     // skillTemplate 是**带 {q} 占位**的原文；plannedSteps 是替换成本次查询词后的。
+     // 沉淀时必须存模板，不然"搜火锅"存进去的是 Type 火锅，下次搜烤肉就会输入火锅。
+     skillTemplate = sk.steps;
+     plannedSteps = SkillStore.bind(sk.steps, SkillStore.queryOf(task));
+     log.log("技能库命中「" + sk.label + "」（" + sk.steps.size() + " 步，已成功 " + sk.ok
+       + " 次）→ 先按它直行，这几步不调模型");
+    }
+   }
+  }
+  int skillIdx = 0;
+  boolean skillMode = plannedSteps != null && !plannedSteps.isEmpty();
+  final List<String> roundSteps = new ArrayList<String>();   // 本轮真正走通的动作，成功后沉淀
+
   String dp = directPagesText(ctx);
   if(!dp.isEmpty()) log.log("可直达页面:\n" + dp.trim());
   msgs.add(userMsg(task + dp, shot));
@@ -239,6 +401,29 @@ public class Agent {
     log.log("» 收到追加指令：" + pendingInject);
     msgs.add(userMsg("用户追加指令：" + pendingInject, awaitShot(svc)));
     pendingInject = null;
+   }
+   // ★ 技能直行：这一帧不调模型，直接复用上次走通的动作
+   if(skillMode && skillIdx < plannedSteps.size()){
+    String src = plannedSteps.get(skillIdx++);
+    Map<String,Object> skAct = parse("<answer>" + src + "</answer>");
+    log.log("--- step " + step + " · 技能 ---");
+    log.log("动作: " + describeAction(skAct) + "（复用上次成功路径，未调用模型）");
+    String sst = execute(ctx, skAct, svc, log);
+    if("ok".equals(sst)){
+     roundSteps.add(src);
+     sleep(700);
+    }else{
+     // 这就是"缓存失效"的处理：技能是上次成功的快照，App 一改版就不灵了。
+     // 立刻放弃、交还模型，并给这条技能记一次失败（连错两次它自己会被淘汰）。
+     log.log("技能在第 " + step + " 步失效（" + sst + "）→ 放弃，交还模型重新决策");
+     skillMode = false;
+     if(skillPkg != null) SkillStore.record(ctx, skillPkg, skillVerb, skillStartPage,
+       skillLabel, plannedSteps, false);
+     roundSteps.clear();
+     byte[] f = awaitShot(svc);
+     if(f != null){ stripLastImage(msgs); msgs.add(screenMsg(f)); }
+    }
+    continue;
    }
    log.log("--- step " + step + " ---");
    TokenSink tk = tokens;
@@ -282,9 +467,19 @@ public class Agent {
      to.put("message", "请求连续被服务端拒绝（可能是某屏文字里有特殊字符），我没法继续，请你手动处理");
      return execute(ctx, to, svc, log);
     }
+    // ★ 硬失败（额度/权限）和限流都不要再把步数烧光：直接停下，把原因说清楚
+    if(apiFatal != null){
+     st.onState("err", "API 额度或权限问题：" + apiFatal);
+     return "err";
+    }
+    if(apiRateLimited){
+     st.onState("err", "API 被限流(429)：key 调用太密或额度打满，等几分钟、或降低步数再试");
+     return "err";
+    }
     log.log("API 调用失败，重试"); sleep(2000); continue;
    }
    Map<String,Object> act = parse(content);
+   String actSrc = actionOf(content);          // 原文留着，成功后沉淀成技能
    String think = extractThink(content);
    log.log("思考: " + think);
    log.log("动作: " + describeAction(act));
@@ -299,6 +494,7 @@ public class Agent {
     msgs.add(u); continue;
    }
         String status = execute(ctx, act, svc, log);
+        if("ok".equals(status) && actSrc != null) roundSteps.add(actSrc);
         if("ok".equals(status) && diagnosticStopText != null
            && ("Type".equals(act.get("action")) || "Type_Name".equals(act.get("action")))
            && diagnosticStopText.equals(act.get("text"))){
@@ -353,6 +549,29 @@ public class Agent {
     }
     byte[] evidence = awaitShot(svc);
     if(evidence == null){ st.onState("err", svc.captureError); return "err"; }
+    // ★ 沉淀：任务真的完成了，把这一轮走通的动作序列存成技能。
+    //   只在这一刻写——成功门控，避免把一次偶然的运气当成能力。
+    if(SkillStore.enabled(ctx) && currentPkg != null && !currentPkg.isEmpty() && !roundSteps.isEmpty()){
+     String verb = skillVerb != null ? skillVerb : SkillStore.normalize(task)[0];
+     if(verb != null && !verb.isEmpty()){
+      String page = "";
+      try{ page = pageKey(latestUi); }catch(Throwable ig){}
+      // 走的是技能 → 存模板（含 {q}），否则下次换个词就串味了
+      List<String> toSave = (skillTemplate != null && !skillTemplate.isEmpty())
+        ? skillTemplate : roundSteps;
+      // 模型摸索出来的步骤里 Type 的是具体词（"火锅"），存之前把本次的查询词换回 {q}，
+      // 否则下次"搜烤肉"会照抄上次的"火锅"。技能必须是带参数的函数，不是固定脚本。
+      String q = SkillStore.queryOf(task);
+      if(q != null && !q.isEmpty()){
+       List<String> norm = new ArrayList<String>();
+       for(String s : toSave) norm.add(s.replace(q, "{q}"));
+       toSave = norm;
+      }
+      SkillStore.record(ctx, currentPkg, verb, page, task, toSave, true);
+      log.log("已沉淀技能：" + currentPkg + " · " + verb + "（" + toSave.size() + " 步"
+        + (toSave == skillTemplate ? "，存的是模板" : "") + "）");
+     }
+    }
     rememberFacts(ctx, log);
     log.log("模型判断完成，等待核对实际结果: " + m);
     st.onState("review", m);
@@ -448,31 +667,50 @@ public class Agent {
    }
    // 虚拟屏上还有别的应用窗口 → 说明 App 还活着（可能正弹着对话框），继续让模型看屏处理
    if(!svc.hasTargetWindow(displayId, currentPkg) && !svc.hasAnyAppWindow(displayId)){
-    log.log("执行停止：目标应用窗口不在指定虚拟屏"); return "err";
+    // 但 overlay 副屏的窗口无障碍根本看不见（它只报默认屏的窗口）。这时候用画面判断，
+    // 否则每个动作都会被判死 —— 旧机日志里"执行停止：目标应用窗口不在指定虚拟屏"就是它。
+    if(!screenLooksAlive(displayId)){
+     log.log("执行停止：目标应用窗口不在指定虚拟屏（画面也是空的）"); return "err";
+    }
+    log.log("无障碍看不到这块屏，但画面有内容 → 继续按截图执行");
    }
    if(!svc.hasTargetWindow(displayId, currentPkg)) log.log("目标窗口缺席，但虚拟屏上仍有窗口，继续按当前画面执行");
   }
+  // ★ 监控模式下动作要作用在主屏上，不是副屏。
+  //   以前只有长按走了主屏分支，Tap/Type 还打在 displayId（副屏）→ 表现为
+  //   "开了主屏监控，但它在那儿干看着不动手"。
+  final int actD = watchOnMain ? 0 : displayId;
   if(a.equals("Type") || a.equals("Type_Name")){
    if(!(act.get("text") instanceof String)) return "err";
    String text = (String)act.get("text");
-   boolean ok = svc.setText(displayId, text);
+   boolean ok = svc.setText(actD, text);
    if(ok){ log.log("执行: ok type " + text); return "ok"; }
+   // ★ 无障碍写不进去时（藏树 App，或 overlay 副屏的树根本看不见），走剪贴板粘贴：
+   //   设剪贴板 → input -d N keyevent 279(PASTE)。绕开无障碍树，也不碰输入法。
+   try{ svc.clip(text); }catch(Throwable ig){}
+   sleep(150);
+   if(ShellChannel.available() && ShellChannel.key(displayId, 279)){
+    log.log("执行: 已用剪贴板粘贴「" + text + "」，需用下一帧核对文字"); return "ok";
+   }
    if(ShellChannel.text(displayId,text)){
     log.log("执行: 输入命令成功，需用下一帧核对文字"); return "ok";
    }
-   log.log("执行: err 无法写入目标输入框；请接管输入（不修改剪贴板）");
+   log.log("执行: err 无法写入目标输入框；请接管输入");
    return "err";
   }
   if(a.equals("Tap")){
    if(act.get("text") instanceof String){
-    boolean clicked=svc.clickByText(displayId,(String)act.get("text"));
+    boolean clicked=svc.clickByText(actD,(String)act.get("text"));
     log.log("执行: "+(clicked?"ok":"err")+" 按文字点击 "+act.get("text")); return clicked?"ok":"err";
    }
    int[] el = (int[])act.get("element");
    if(!validPoint(el)) return "err";
-   int x = el[0]*VW/1000, y = el[1]*VH/1000;
+   // 监控模式看的是主屏截图，坐标得按主屏尺寸换算（VW/VH 是副屏的）
+   int bw = watchOnMain ? mainW : VW, bh = watchOnMain ? mainH : VH;
+   if(bw <= 0 || bh <= 0){ bw = VW; bh = VH; }
+   int x = el[0]*bw/1000, y = el[1]*bh/1000;
    lastTapX = x; lastTapY = y;
-   boolean ok = svc.clickAt(displayId, x, y);
+   boolean ok = svc.clickAt(actD, x, y);
    if(!ok) log.log("执行: err tap " + x + "," + y + "（树被藏且 shell 不可用，建议接管）");
    else log.log("执行: ok tap " + x + "," + y);
    return ok ? "ok" : "err";
@@ -611,7 +849,7 @@ public class Agent {
  /** 启动前把常用运行时权限一次性授予目标 App（shell 身份），
   *  让定位/存储/电话这类系统弹窗根本不出现在后台工作区里。 */
  void preGrant(String pkg){
-  if(!ShellChannel.ready() || pkg == null || pkg.isEmpty()) return;
+  if(!ShellChannel.available() || pkg == null || pkg.isEmpty()) return;
   String[] perms = {
    "android.permission.ACCESS_FINE_LOCATION","android.permission.ACCESS_COARSE_LOCATION",
    "android.permission.ACCESS_BACKGROUND_LOCATION","android.permission.READ_PHONE_STATE",
@@ -847,22 +1085,26 @@ public class Agent {
   // 三路策略：能用组件名就先精确打，其次 MAIN/LAUNCHER 匹配，最后才用 App 内 Intent
   // 每路都带 NEW_TASK|MULTIPLE_TASK(0x18000000)，避免复用已经在主屏上的旧任务
   List<String> cmds = new ArrayList<String>();
+  // ★ 必须先带 MULTIPLE_TASK(0x18000000)：只带 NEW_TASK 时，如果目标 App 在主屏已经有任务，
+  //   系统会复用主屏那个任务，应用根本不来副屏（表现为"启动了但虚拟屏上没窗口"）。
+  //   副屏上的任务不进主屏的最近任务列表，所以不用担心给用户后台堆一排微信。
   if(act != null){
-   // 先只带 NEW_TASK（复用已有任务），别一上来就 MULTIPLE_TASK ——
-   // 后者每次都新开一个任务，用户后台很快堆出一排微信/京东。
-   cmds.add("am start --display " + displayId + " -f 0x10000000 -n " + ShellChannel.quote(act) + " 2>&1");
    cmds.add("am start --display " + displayId + " -f 0x18000000 -n " + ShellChannel.quote(act) + " 2>&1");
+   cmds.add("am start --display " + displayId + " -f 0x10000000 -n " + ShellChannel.quote(act) + " 2>&1");
   }
-  cmds.add("am start --display " + displayId + " -f 0x10000000 -a android.intent.action.MAIN "
-      + "-c android.intent.category.LAUNCHER -p " + ShellChannel.quote(pkg) + " 2>&1");
   cmds.add("am start --display " + displayId + " -f 0x18000000 -a android.intent.action.MAIN "
+      + "-c android.intent.category.LAUNCHER -p " + ShellChannel.quote(pkg) + " 2>&1");
+  cmds.add("am start --display " + displayId + " -f 0x10000000 -a android.intent.action.MAIN "
       + "-c android.intent.category.LAUNCHER -p " + ShellChannel.quote(pkg) + " 2>&1");
 
   // 阶段1：逐条下发，每条后快速探 3 秒（命令视角的成败立刻知道，不用空等）
   boolean shellTried = false, accepted = false;
   for(int i = 0; i < cmds.size() && !stopped; i++){
+   // ShellChannel.raw 内部已经处理了"Shizuku 不在就改走 adb shell"，
+   // 这里只需要把用的是哪条通道说清楚，方便排错。
+   if(!ShellChannel.ready()) log.log("走内置通道启动: " + cmds.get(i));
    String out = ShellChannel.raw(cmds.get(i), 15000);
-   if(out == null) break;                    // Shizuku 不可用 → 直接走 App 内 Intent
+   if(out == null) break;                    // 两条通道都不可用 → 走 App 内 Intent
    shellTried = true;
    String o = out.trim().replace("\n", " ");
    log.log("启动命令" + (i + 1) + "/" + cmds.size() + ": " + o);
@@ -882,7 +1124,11 @@ public class Agent {
    log.log("启动已核对（慢启动）：" + pkg + " display=" + displayId); sleep(500); return true;
   }
 
-  // 三路 shell 都不行 → 最后用 App 内 Intent（微信早期验证过这条路）
+  // 只有 shell 通道完全不可用时才试 App 内 Intent：
+  // 副屏不是我们自己的（属主是 shell/系统），App 进程 startActivity 带 launchDisplayId 必然
+  // SecurityException（旧机日志里刷屏的就是它），shell 还在的话走它就是白等 20 秒。
+  if(shellTried){ if(svc != null) log.log("虚拟屏实况: " + svc.dumpWindows(displayId));
+   log.log("启动未确认：指定虚拟屏没有目标应用窗口"); return false; }
   try{
    Intent intent = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
    if(intent == null && act != null){
@@ -923,7 +1169,33 @@ public class Agent {
    tick++;
    sleep(500);
   }
-  return svc.hasTargetWindow(displayId, pkg);
+  if(svc.hasTargetWindow(displayId, pkg)) return true;
+  // ★ 无障碍只把窗口报给默认屏，overlay 系统副屏上的窗口它根本看不见
+  //   （旧机实测：应用明明已经在屏上了，这里还是"没有任何窗口"）。
+  //   这时候只能信画面：屏上确实有东西，就当起来了。
+  if(!svc.hasAnyAppWindow(displayId) && screenLooksAlive(displayId)){
+   log.log("无障碍看不到这块屏（overlay 副屏常见），但画面有内容 → 视为已启动");
+   return true;
+  }
+  return false;
+ }
+
+ /** 无障碍看不见的副屏：直接看画面。纯黑/空帧的 JPEG 很小，抽样 49 个点看亮度 */
+ boolean screenLooksAlive(int displayId){
+  try{
+   byte[] shot = OwnedDisplay.peek(displayId);
+   if(shot == null || shot.length < 6000) return false;
+   android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length);
+   if(b == null) return shot.length > 15000;
+   int w = b.getWidth(), h = b.getHeight(), bright = 0;
+   for(int y = 1; y < 8; y++) for(int x = 1; x < 8; x++){
+    int c = b.getPixel(w*x/8, h*y/8);
+    int lum = ((c>>16)&0xff) + ((c>>8)&0xff) + (c&0xff);
+    if(lum > 90) bright++;
+   }
+   b.recycle();
+   return bright >= 2;
+  }catch(Throwable t){ return false; }
  }
  /** 模型把思考写在 answer 前/后/或压根不写，这里统一剥出来，避免日志里"思考:"一片空白 */
  static String extractThink(String content){
@@ -939,6 +1211,22 @@ public class Agent {
   t = t.replace("\n"," ").replaceAll("\\s+"," ");
   if(t.length() > 140) t = t.substring(0,140);
   return t;
+ }
+
+ /** 从模型输出里抠出完整的 do(action=...) 原文，用来沉淀成技能。
+  *  存的是**原文**而不是解析后的 Map，这样重放时走的是同一个解析器，不会有两套格式。 */
+ static String actionOf(String content){
+  if(content == null) return null;
+  int i = content.indexOf("do(action=");
+  if(i < 0) i = content.indexOf("do(");
+  if(i < 0) return null;
+  int depth = 0, j = i;
+  for(; j < content.length(); j++){
+   char c = content.charAt(j);
+   if(c == '(') depth++;
+   else if(c == ')'){ depth--; if(depth == 0){ j++; break; } }
+  }
+  return content.substring(i, Math.min(j, content.length())).trim();
  }
 
  /** 把动作 Map 翻成人话。`{action=Tap, element=[I@8b3d3f1}` 这种东西给用户看等于没说。 */
@@ -992,12 +1280,32 @@ public class Agent {
 
  /** 接管：真实屏打开目标 App 新实例（同账号，服务端状态同步；不抢 agent 的任务） */
  /** 找出某个 App 在当前工作区里那个任务的 id（优先取可见的那个） */
- String findTaskId(String pkg){
-  String out = ShellChannel.raw("dumpsys activity activities 2>/dev/null | grep -F "
-      + ShellChannel.quote(pkg) + " | grep -F 'Task{' | head -20", 12000);
-  if(out == null) return null;
+ /** 找**指定屏上**这个包的 task。
+  *  ★ 必须按屏过滤：同一个 App 常常在主屏和副屏各有一个任务，
+  *    只按包名抓会抓到主屏那个，然后 move-stack 到 0 只会抛
+  *    "to its current taskDisplayArea" → 接管被判失败（旧机就是这么翻的）。 */
+ String findTaskId(String pkg, int onDisplay){
+  // 在 shell 侧先过滤：dumpsys 全文几万行根本传不回来，只留 Display 段头和 Task 行
+  String out = ShellChannel.raw(
+    "dumpsys activity activities 2>/dev/null | grep -E '^Display #|A=[0-9]+:' | head -80", 15000);
+  if(out == null){ AgentService.shotDebug("findTaskId: dumpsys 返回 null（通道不通或超时）"); return null; }
+  String marker = "Display #" + onDisplay;
+  int from = out.indexOf(marker);
+  if(from < 0){
+   // 把输出里实际有哪些 Display 段列出来，下次一眼看出是"屏号不对"还是"dumpsys 被截断"
+   StringBuilder segs = new StringBuilder();
+   for(int i = 0; (i = out.indexOf("Display #", i)) >= 0; i += 9){
+    segs.append(out.substring(i, Math.min(out.length(), i + 11))).append(" | ");
+   }
+   AgentService.shotDebug("findTaskId: 输出里没有 " + marker + "，实际有 [" + segs
+     + "] len=" + out.length());
+   return null;
+  }
+  int to = out.indexOf("\nDisplay #", from + marker.length());
+  String seg = to > 0 ? out.substring(from, to) : out.substring(from);
   String fallback = null;
-  for(String line : out.split("\n")){
+  for(String line : seg.split("\n")){
+   if(!line.contains("Task{") || !line.contains(pkg)) continue;
    int h = line.indexOf('#');
    if(h < 0) continue;
    int e = h + 1;
@@ -1014,6 +1322,9 @@ public class Agent {
   if(taskId == null || taskId.isEmpty() || targetDisplay < 0) return false;
   String out = ShellChannel.raw("am display move-stack " + taskId + " " + targetDisplay + " 2>&1", 12000);
   boolean ok = out != null && !out.contains("Exception") && !out.contains("Error");
+  // 已经在目标屏上了不算失败（这个异常的字面意思是"它本来就在这儿"）
+  if(!ok && out != null && out.contains("current taskDisplayArea")) ok = true;
+  lastMoveOut = out;   // 诊断：这条命令到底回了什么，写进 run-log
   android.util.Log.i("Wellphone", "move-stack " + taskId + " -> " + targetDisplay + " : " + out);
   return ok;
  }
@@ -1023,11 +1334,21 @@ public class Agent {
   *  agent 做到一半的界面状态全丢了（相册搜索没了、地图导航卡住），后台还多出一个实例。
   *  搬任务则是同一个实例换块屏显示，状态原封不动，也不会有两个。
   *  实测 am display move-stack 可以 虚拟屏 ↔ 主屏 双向搬。 */
+ /** 上一次 move-stack 的原始输出（诊断用，写进 run-log 才看得到） */
+ String lastMoveOut = null;
  String takeoverMoveToMain(){
   if(currentPkg == null || currentPkg.isEmpty()) return null;
-  String tid = findTaskId(currentPkg);
-  if(tid == null){ android.util.Log.i("Wellphone", "接管：找不到任务 id"); return null; }
-  return moveTask(tid, 0) ? tid : null;
+  // 找的是**副屏上**那个任务，不是主屏上可能存在的同名旧任务
+  String tid = findTaskId(currentPkg, displayId);
+  if(tid == null){
+   String d = "接管失败：副屏 " + displayId + " 上找不到 " + currentPkg + " 的任务";
+   android.util.Log.i("Wellphone", d); AgentService.shotDebug(d);
+   return null;
+  }
+  boolean ok = moveTask(tid, 0);
+  String d = "接管：move-stack " + tid + " → 0 = " + ok + " 原始输出=[" + lastMoveOut + "]";
+  android.util.Log.i("Wellphone", d); AgentService.shotDebug(d);
+  return ok ? tid : null;
  }
  String moveTaskBack(String taskId){
   if(taskId == null || displayId <= 0) return null;
@@ -1042,8 +1363,12 @@ public class Agent {
   // 而 MULTIPLE_TASK 保证是主屏上一个干净的新实例（重复点击由 takeoverActive 拦着，不会堆）。
   String act = resolveLaunchComponent(ctx, currentPkg);
   if(act != null){
-   String out = ShellChannel.raw("am start --display 0 -f 0x18000000 -n "
+   // 0x18020000 = NEW_TASK|MULTIPLE_TASK|REORDER_TO_FRONT：
+   // 光有 NEW_TASK 时这个 App 在主屏若已有后台任务，会被复用但**不带到前台**，
+   // 表现就是"点了接管主屏没动静"（dumpsys 里 task 在 display 0 却 visible=false）。
+   String out = ShellChannel.raw("am start --display 0 -f 0x18020000 -n "
      + ShellChannel.quote(act) + " 2>&1", 12000);
+   AgentService.shotDebug("接管兜底 am start --display 0 -> " + out);
    if(out != null && !out.contains("Error") && !out.contains("Permission")) return;
   }
   Intent i = ctx.getPackageManager().getLaunchIntentForPackage(currentPkg);
@@ -1079,6 +1404,16 @@ public class Agent {
      log.log("⚠️ " + p.name + " 的 API key 无效（401），已停用：请去控制台确认 key 是否复制完整、"
        + "是否开通了该模型。可改 files/llm.json 免重装换 key。");
      curProvider = (curProvider + 1) % PROVIDERS.size();
+    }else if(msg.contains("429")){
+     apiRateLimited = true;
+     log.log("⚠️ " + p.name + " 被限流(429)：同一把 key 调用太密，或 TPM/免费额度打满。"
+       + "原样重试没用，请降低步数或稍等几分钟再跑。" + msg);
+    }else if(msg.contains("402") || msg.contains("403") || msg.contains("arrears")
+       || msg.contains("Arrears") || msg.contains("overdue") || msg.contains("quota")
+       || msg.contains("Quota") || msg.contains("insufficient") || msg.contains("balance")){
+     apiFatal = msg;
+     log.log("⚠️ " + p.name + " 额度/权限问题（" + msg + "）：去控制台看余额是否耗尽、"
+       + "这个模型是否已经开通接入点。");
     }else log.log(p.name + " 失败(" + e + ")，切换下一个");
    }
   }
@@ -1090,6 +1425,27 @@ public class Agent {
   *  [{"name":"doubao","model":"xxx","key":"xxx"}, ...] 只覆盖匹配到的字段 */
  void applyLlmConfig(android.content.Context ctx){
   try{
+   // ★ 优先从 SharedPreferences 取（App 内配置最可靠：实测本 ROM 上 App 读自己
+   //   Android/data/<pkg>/files 里的文件会失败，所以不要把 key 的唯一来源放在文件上）
+   String spKey = ctx.getSharedPreferences("wellphone", android.content.Context.MODE_PRIVATE)
+       .getString("api_key", "");
+   // ★ DeepSeek 的 key 也从 SharedPreferences 读（App 内「API Key」对话框填的），
+   //   不能只靠 llm.json —— 本机 App 读自己 Android/data/<pkg>/files 实测读不到。
+   try{
+    String dk = ctx.getSharedPreferences("wellphone", android.content.Context.MODE_PRIVATE)
+        .getString("deepseek_key", "");
+    if(dk != null && !dk.trim().isEmpty()){
+     ROUTER.key = dk.trim();
+     for(Provider p : PROVIDERS) if("deepseek".equals(p.name)) p.key = dk.trim();
+    }
+   }catch(Throwable ig){}
+   if(spKey != null && !spKey.trim().isEmpty()){
+    for(Provider p : PROVIDERS) if("doubao".equals(p.name)) p.key = spKey.trim();
+    llmConfigMsg = "已从 App 内配置读取 API key";
+    android.util.Log.i("Wellphone", llmConfigMsg);
+    // ★ 不能就此返回：llm.json 里可能还配了 DeepSeek（路由/问答用）和 vision 选择。
+    //   以前这里直接 return，导致只要在 App 里填过 key，llm.json 就永远读不到。
+   }
    File f = new File(ctx.getExternalFilesDir(null), "llm.json");
    if(!f.exists()){
     llmConfigMsg = "未找到 " + f.getAbsolutePath() + "（API key 未配置）";
@@ -1108,9 +1464,44 @@ public class Agent {
     p.model = jsonField(seg, "model", p.model);
     p.key = jsonField(seg, "key", p.key);
    }
+   // ★ DeepSeek 一份配置养两个模型：视觉版跑主循环，纯文本版跑路由/问答，共用一个 key。
+   //   两个模型名分开写，是因为 -exp 视觉模型随时可能变，改这里就行，不用动代码。
+   int di = s.indexOf("\"deepseek\"");
+   if(di >= 0){
+    String seg = s.substring(di, Math.min(s.length(), di + 600));
+    String dkey = jsonField(seg, "key", "");
+    String dmodel = jsonField(seg, "model", "");
+    String tmodel = jsonField(seg, "text_model", "");
+    if(!dkey.isEmpty()){ ROUTER.key = dkey; ROUTER.url = "https://api.deepseek.com/chat/completions"; }
+    if(!tmodel.isEmpty()) ROUTER.model = tmodel;
+    for(Provider p : PROVIDERS) if("deepseek".equals(p.name)){
+     if(!dkey.isEmpty()) p.key = dkey;
+     if(!dmodel.isEmpty()) p.model = dmodel;
+    }
+   }
+   // vision 指定主循环用哪个 provider（"doubao" / "deepseek"），方便实测对比谁更好用
+   String vision = jsonField(s, "vision", "");
+   if(!vision.isEmpty()){
+    for(int i = 0; i < PROVIDERS.size(); i++){
+     Provider p = PROVIDERS.get(i);
+     if(vision.equals(p.name) && p.key != null && !p.key.isEmpty()){ curProvider = i; break; }
+    }
+   }
+   // 用户在界面上按「大脑」按钮切换过 → 以他的选择为准（免得每次对比都要改 llm.json）
+   try{
+    String vn = ctx.getSharedPreferences("wellphone", android.content.Context.MODE_PRIVATE)
+        .getString("vision_name", "");
+    if(vn != null && !vn.isEmpty()){
+     for(int i = 0; i < PROVIDERS.size(); i++){
+      Provider p = PROVIDERS.get(i);
+      if(vn.equals(p.name) && p.key != null && !p.key.isEmpty() && !p.dead){ curProvider = i; break; }
+     }
+    }
+   }catch(Throwable ig){}
    int n = 0;
    for(Provider p : PROVIDERS) if(p.key != null && !p.key.isEmpty()) n++;
    llmConfigMsg = "llm.json 已应用，有 key 的 provider 数：" + n;
+   if(n == 0) llmConfigMsg += "（文件读到了但没有解析出 key，检查 JSON 格式）";
    android.util.Log.i("Wellphone", llmConfigMsg);
   }catch(Throwable t){}
  }
@@ -1423,6 +1814,7 @@ public class Agent {
   }
   ctxHint = ctx; watchOnMain = true;
   int[] sz = mainSize();
+  mainW = sz[0]; mainH = sz[1];   // 动作坐标按主屏换算，别用副屏的 VW/VH
   List<Map<String,Object>> msgs = new ArrayList<Map<String,Object>>();
   Map<String,Object> sys = new HashMap<String,Object>();
   sys.put("role","system"); sys.put("content", WATCH_PROMPT + "\n任务：" + task);
@@ -1529,12 +1921,18 @@ public class Agent {
  /** 给截图画 Set-of-Mark 编号框。
   *  让模型猜 0-999 的像素坐标本来就靠不住（实测点歪、点进隔壁条目）；
   *  在图上直接框出可交互元素并编号，模型只要照抄清单里的 center 就不会偏。 */
- static byte[] markTargets(byte[] jpeg, List<String[]> ts){
+ /** 给截图画 Set-of-Mark 编号框。
+  *  ★ ts 里的 bounds 是**屏幕像素**（0..1216 / 0..2688），而画布是**缩略后的截图**
+  *    （720x1592）。以前直接拿屏幕坐标去画，框大半落到画布外、剩下的也全错位——
+  *    模型照抄的 center 自然跟着偏，表现为"认得出按钮却点不到"。必须按比例缩放。 */
+ static byte[] markTargets(byte[] jpeg, List<String[]> ts, int scrW, int scrH){
   if(jpeg == null || ts == null || ts.isEmpty()) return jpeg;
   try{
    Bitmap src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
    if(src == null) return jpeg;
    Bitmap bm = src.copy(Bitmap.Config.ARGB_8888, true);
+   float sx = scrW > 0 ? bm.getWidth() * 1f / scrW : 1f;
+   float sy = scrH > 0 ? bm.getHeight() * 1f / scrH : 1f;
    Canvas cv = new Canvas(bm);
    Paint box = new Paint(Paint.ANTI_ALIAS_FLAG);
    box.setStyle(Paint.Style.STROKE); box.setStrokeWidth(4); box.setColor(0xFFFF2D55);
@@ -1547,6 +1945,7 @@ public class Agent {
      l = Integer.parseInt(ts.get(i)[3]); t = Integer.parseInt(ts.get(i)[4]);
      r = Integer.parseInt(ts.get(i)[5]); b = Integer.parseInt(ts.get(i)[6]);
     }catch(Throwable ig){ continue; }
+    l = (int)(l * sx); r = (int)(r * sx); t = (int)(t * sy); b = (int)(b * sy);
     cv.drawRect(l, t, r, b, box);
     cv.drawRect(l, t - 36, l + 34, t, chip);
     cv.drawText(String.valueOf(i + 1), l + 9, t - 9, num);
@@ -1561,7 +1960,7 @@ public class Agent {
  }
 
  Map<String,Object> userMsg(String text, byte[] png){
-  String b64 = Base64.encodeToString(markTargets(png, latestTargets), Base64.NO_WRAP);
+  String b64 = Base64.encodeToString(markTargets(png, latestTargets, VW, VH), Base64.NO_WRAP);
   List<Map<String,Object>> parts = new ArrayList<Map<String,Object>>();
   Map<String,Object> img = new HashMap<String,Object>();
   img.put("type","image_url"); img.put("url","data:image/jpeg;base64,"+b64); parts.add(img);
@@ -1647,7 +2046,12 @@ public class Agent {
  /** 步数上限，由用户在 App 里用拖动条设定（20~50）。步数直接决定 token 消耗，所以交给用户定。 */
  public volatile int maxSteps = 40;
  volatile boolean watchOnMain = false;
+ /** 监控模式下的主屏像素尺寸：坐标要按它换算，VW/VH 是副屏的，两者常常不一样
+  *  （实测 NX733J 主屏 1216x2688，副屏按主屏建的是 1080x2400） */
+ int mainW = 0, mainH = 0;
  volatile boolean httpBadRequest = false; volatile int badRequestCount = 0;
+ // ★ API 的"硬失败"（额度耗尽/未开通/限流）：重试一万次也一样，别把步数全烧在重试上
+ volatile String apiFatal = null; volatile boolean apiRateLimited = false;
  public void inject(String text){ pendingInject = text; }
  volatile int[] fpPrev = null, fpPrev2 = null;
  byte[] awaitShot(AgentService svc){
