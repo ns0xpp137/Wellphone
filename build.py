@@ -1,8 +1,42 @@
 from pathlib import Path
 import subprocess,zipfile,os,sys
-r=Path(__file__).parent;sdk=Path('C:/Users/26790/AppData/Local/Android/Sdk');bt=sdk/'build-tools/33.0.0';jar=sdk/'platforms/android-33/android.jar';jdk=Path('D:/MyProjects/JDK/bin')
-os.environ['JAVA_HOME']='D:/MyProjects/JDK'
+r=Path(__file__).parent
+
+# ===== 工具链定位：优先环境变量，其次常见默认位置 =====
+def _first_dir(cands):
+    for c in cands:
+        try:
+            if c and Path(c).is_dir(): return Path(c)
+        except Exception: pass
+    return None
+
+def _sdk_root():
+    cands=[os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'),
+           Path(os.environ.get('LOCALAPPDATA',''))/'Android'/'Sdk',
+           Path.home()/'AppData'/'Local'/'Android'/'Sdk',
+           Path('/usr/local/share/android-sdk')]
+    d=_first_dir(cands)
+    if d is None: raise SystemExit('找不到 Android SDK：请设置环境变量 ANDROID_HOME')
+    return d
+
+def _jdk_root():
+    cands=[]
+    for k in ('JAVA_HOME','JDK_HOME'):
+        v=os.environ.get(k)
+        if v: cands.append(Path(v))
+    cands += [Path('D:/MyProjects/JDK'), Path('C:/Program Files/Java/jdk-17'),
+              Path('/usr/lib/jvm/default-java')]
+    for c in cands:
+        try:
+            if c and ((c/'bin'/'javac.exe').exists() or (c/'bin'/'javac').exists()): return c
+        except Exception: pass
+    raise SystemExit('找不到 JDK（需要 javac）：请设置环境变量 JAVA_HOME')
+
+sdk=_sdk_root(); bt=sdk/'build-tools/33.0.0'; jar=sdk/'platforms/android-33/android.jar'
+jdkroot=_jdk_root(); jdk=jdkroot/'bin'
+os.environ['JAVA_HOME']=str(jdkroot)
 os.environ['PATH']=str(jdk)+os.pathsep+os.environ['PATH']
+
 def run(args):
     p=subprocess.run([str(x) for x in args],cwd=r,capture_output=True)
     if p.returncode!=0:
@@ -26,11 +60,11 @@ VARIANTS = {
  # applicationId 不变，所以能覆盖升级，配对信息和无障碍授权都保留。
  # code 递增到 3：换图标时靠它让桌面强制刷新图标缓存
  'builtin': dict(pkg='local.wellphone.builtin', label='机灵',
-                 ver='0.2', code='3', out='Jiling-0.2.apk'),
+                 ver='0.5', code='5', out='Jiling-0.5.apk'),
  # 技能版：与「机灵」并存安装（applicationId 不同），用来开发程序化记忆。
  # ★ 未确认前不要重新编译/安装 builtin，机灵这个能演示的版本保持不动。
  'skill': dict(pkg='local.wellphone.skill', label='机灵·技能版',
-               ver='0.3', code='1', out='Jiling-Skill-0.3.apk'),
+               ver='0.5', code='3', out='Jiling-Skill-0.5.apk'),
 }
 variant = 'dev'
 for a in sys.argv[1:]:

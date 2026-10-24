@@ -155,7 +155,7 @@ public final class BuiltinShell {
                 // ★ 每次都新建连接，绝不复用：DisplayHost 的常驻进程已经占着一条连接的
                 //   shell 流，复用会让它协议错乱（not A_WRTE / EOFException），所有后续命令
                 //   全部失败 —— 表现为"虚拟屏上启动不了任何应用"、"接管搬不动"。
-                //   这是我加"复用共享连接"优化时引入的回归，宁可多花一次握手也不能省。
+                //   该问题由"复用共享连接"的优化引入，宁可多花一次握手也不能省。
                 AdbClient c;
                 SharedPreferences p = ctx.getSharedPreferences("builtinshell", Context.MODE_PRIVATE);
                 c = new AdbClient(p.getString("host", "127.0.0.1"), p.getInt("port", 5555), key(ctx));

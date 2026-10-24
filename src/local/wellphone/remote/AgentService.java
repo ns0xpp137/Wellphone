@@ -225,6 +225,16 @@ public class AgentService extends AccessibilityService {
   }catch(Throwable t){}
   return out;
  }
+ /** 像不像输入框：类名里带 edit 的一律算（各 App 自定义 EditText 子类很多） */
+ private static boolean isEditLike(AccessibilityNodeInfo n){
+  if(n == null) return false;
+  if(n.isEditable()) return true;
+  CharSequence cn = n.getClassName();
+  if(cn == null) return false;
+  String c = cn.toString().toLowerCase();
+  return c.contains("edit") || c.contains("searchview") || c.contains("autocomplete");
+ }
+
  private void dumpAll(AccessibilityNodeInfo n, StringBuilder sb, int depth){
   if(depth > 30 || sb.length() > 30000) return;
   String text = n.getText() == null ? "" : n.getText().toString();
@@ -264,9 +274,11 @@ public class AgentService extends AccessibilityService {
      int slash = rid == null ? -1 : rid.lastIndexOf('/');
      label = rid == null ? "按钮" : (slash >= 0 ? rid.substring(slash + 1) : rid);
     }
+    // 第 8 位记 editable：后面要靠它拦住"点输入框"这个会把用户输入法抢走的动作
     out.add(new String[]{ label,
       String.valueOf(b.centerX() * 1000 / width), String.valueOf(b.centerY() * 1000 / height),
-      String.valueOf(b.left), String.valueOf(b.top), String.valueOf(b.right), String.valueOf(b.bottom) });
+      String.valueOf(b.left), String.valueOf(b.top), String.valueOf(b.right), String.valueOf(b.bottom),
+      (n.isEditable() || isEditLike(n)) ? "1" : "0" });
    }
   }
   for(int i = 0; i < n.getChildCount(); i++){
